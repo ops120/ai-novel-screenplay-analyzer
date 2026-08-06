@@ -1,0 +1,103 @@
+/* ==================== v26 商业浅色主题 ==================== */
+
+:root {
+  --canvas: #f5f5f0;
+  --surface: #ffffff;
+  --surface-alt: #fafaf7;
+  --ink: #1a1a1a;
+  --ink-soft: #666;
+  --ink-faint: #999;
+  --vermilion: #c04820;
+  --vermilion-dark: #a03a18;
+  --vermilion-light: #e8d8d0;
+  --accent: #4D6BFE;
+  --accent-soft: #e8edff;
+  --border: #e0ddd8;
+  --border-soft: #eee;
+  --shadow-1: 0 1px 3px rgba(0,0,0,0.06);
+  --shadow-2: 0 4px 12px rgba(0,0,0,0.08);
+  --shadow-3: 0 8px 24px rgba(0,0,0,0.12);
+  --radius: 8px;
+  --radius-sm: 4px;
+  --radius-lg: 12px;
+  --font: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --mono: 'Cascadia Code', 'Fira Code', monospace;
+  --toast-bg: #fef3ef;
+  --graph-aux-1: #6b7280;
+  --graph-aux-2: #9ca3af;
+  --graph-aux-3: #d1d5db;
+  --rail-width: 88px;
+  --topbar-height: 56px;
+  --sidebar-width: 280px;
+}
+
+/* 主题变体 */
+[data-theme="dawn"] {
+  --canvas: #fdf6ee; --surface: #fffdf8; --surface-alt: #fef9f0;
+  --ink: #2c2418; --ink-soft: #7a6b58; --ink-faint: #a89880;
+  --vermilion: #d45a20; --border: #e8ddd0; --border-soft: #f0e8dc; --toast-bg: #fef6e8;
+}
+[data-theme="cloud"] {
+  --canvas: #f0f4f8; --surface: #ffffff; --surface-alt: #f8fafc;
+  --ink: #1e293b; --ink-soft: #64748b; --ink-faint: #94a3b8;
+  --vermilion: #dc2626; --accent: #3b82f6; --border: #e2e8f0; --border-soft: #f1f5f9;
+}
+[data-theme="daylight"] {
+  --canvas: #ffffff; --surface: #ffffff; --surface-alt: #f9fafb;
+  --ink: #111827; --ink-soft: #4b5563; --ink-faint: #9ca3af;
+  --vermilion: #b91c1c; --border: #e5e7eb; --border-soft: #f3f4f6;
+}
+[data-theme="night"] {
+  --canvas: #0f1724; --surface: #1a2332; --surface-alt: #1e2a3a;
+  --ink: #e2e8f0; --ink-soft: #94a3b8; --ink-faint: #64748b;
+  --vermilion: #f87171; --accent: #60a5fa;
+  --border: #2d3a4a; --border-soft: #243040; --toast-bg: #1e2a3a;
+  --shadow-1: 0 1px 3px rgba(0,0,0,0.2); --shadow-2: 0 4px 12px rgba(0,0,0,0.3); --shadow-3: 0 8px 24px rgba(0,0,0,0.4);
+}
+[data-theme="slate"] {
+  --canvas: #f1f5f9; --surface: #ffffff; --surface-alt: #f8fafc;
+  --ink: #0f172a; --ink-soft: #475569; --ink-faint: #94a3b8;
+  --vermilion: #dc2626; --accent: #475569; --border: #e2e8f0; --border-soft: #f1f5f9;
+}
+[data-theme="evidence"] {
+  --canvas: #fefce8; --surface: #fffbeb; --surface-alt: #fef9c3;
+  --ink: #1c1917; --ink-soft: #78716c; --ink-faint: #a8a29e;
+  --vermilion: #b91c1c; --accent: #ca8a04; --border: #e7e5e4; --border-soft: #f5f5f4; --toast-bg: #fef3c7;
+}
+
+/* ==================== 基础 ==================== */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; overflow: hidden; }
+body {
+  font-family: var(--font);
+  background: var(--canvas);
+  color: var(--ink);
+}
+#root { height: 100%; display: flex; flex-direction: column; }
+
+button {
+  cursor: pointer; font-family: var(--font); border: none; outline: none;
+  transition: background 0.15s, color 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+input, textarea, select {
+  font-family: var(--font); background: var(--surface); color: var(--ink);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 6px 10px; font-size: 13px; outline: none;
+}
+input:focus, textarea:focus, select:focus { border-color: var(--vermilion); }
+textarea { resize: vertical; min-height: 80px; }
+
+/* ==================== 滚动条 ==================== */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--ink-faint); }
+
+/* ==================== 平滑过渡（不影响 canvas）==================== */
+body, .nl-rail, .nl-topbar, .nl-sidebar, .nl-workspace,
+.nl-atlas, .nl-inspector, .nl-timeline, button, input, select, textarea {
+  transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }

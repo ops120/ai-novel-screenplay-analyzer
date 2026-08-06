@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-Hans">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>小说剧本智能分析工作台</title>
+    <script>
+      // v26：商业化工作台以浅色主题为默认；
+      // 在 React 挂载前先把 data-theme 写到 <html>，避免首次 paint 闪一帧 ink 主题。
+      // 必须与 src/store.js 的 loadInitialTheme 同步。
+      (function () {
+        try {
+          var saved = null;
+          try { saved = localStorage.getItem('storymap.theme'); } catch (e) { saved = null; }
+          var ALLOWED = ['narrative-light','ink','study-sunrise','ink-realm','daylight-clarity','night-harbor','executive-slate','archive-scholar'];
+          var theme = (saved && ALLOWED.indexOf(saved) >= 0) ? saved : 'narrative-light';
+          if (theme !== 'ink') document.documentElement.setAttribute('data-theme', theme);
+          else document.documentElement.removeAttribute('data-theme');
+        } catch (e) { /* ignore */ }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

@@ -1,0 +1,109 @@
+# 众生谱 .gitignore
+# 作者：你们喜爱的老王
+
+# v2.5：归档目录（备份/日志/审计/工作流缓存，已移到 archive/ 下保留相对路径）
+archive/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+venv/
+ENV/
+env/
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+package-lock.json
+yarn.lock
+
+# 前端构建产物
+frontend/dist/
+frontend/build/
+frontend/.vite/
+
+# 数据库（不提交到 Git）
+storymap.db
+storymap.db-journal
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# 数据库备份
+backups/
+backup/
+*.backup
+
+# 日志文件
+*.log
+*.log.*
+logs/
+
+# 操作系统
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 临时文件
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# 环境配置（敏感信息）
+.env
+.env.local
+.env.*.local
+
+# 打包产物
+*.exe
+*.app
+*.dmg
+*.pkg
+electron/dist/
+electron/build/
+
+# 缓存
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Conda
+.conda/
+*.conda
+
+# 其他
+.coverage
+htmlcov/
+.tox/

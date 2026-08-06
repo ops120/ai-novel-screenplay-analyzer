@@ -1,0 +1,12 @@
+name: vevo
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+    - fastapi==0.109.0
+    - uvicorn==0.27.0
+    - openai==1.12.0
+    - pydantic==2.6.0

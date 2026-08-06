@@ -1,0 +1,12 @@
+{
+  "name": "storymap",
+  "private": true,
+  "version": "2.4.0",
+  "workspaces": ["frontend", "electron"],
+  "scripts": {
+    "dev": "npm run dev --workspace frontend",
+    "build": "npm run build --workspace frontend",
+    "lint": "echo 'no linter configured'",
+    "test": "npm test --workspaces --if-present"
+  }
+}
