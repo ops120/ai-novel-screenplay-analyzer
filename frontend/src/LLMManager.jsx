@@ -8,7 +8,7 @@ const PROTOCOLS = [
 ];
 
 // v2.4：颜色 token 映射 — 把硬编码色值改成 var(--*) 引用，自动跟随主题
-// 品牌紫渐变（#667eea → #764ba2）保留为 LLM 主题色，不与全局 accent 混用
+// v2.6：弹窗骨架与全局配置弹窗（nl-config-*）保持一致；品牌紫仅保留为内容强调色
 const C = {
   surface: 'var(--surface)',
   surface2: 'var(--surface-2)',
@@ -105,72 +105,29 @@ export default function LLMManager({ onClose }) {
   return (
     <div
       onClick={onClose}
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: C.scrim,
-        display: 'flex',
-        alignItems: 'stretch',
-        justifyContent: 'flex-end',
-        zIndex: 100,
-        animation: 'nl-fade-in 0.2s ease-out'
-      }}
+      className="nl-config-overlay"
     >
       <div
         onClick={e => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
         aria-label="演化法阵管理"
-        style={{
-          background: C.surface,
-          borderRadius: '16px 0 0 16px',
-          width: 520,
-          maxWidth: '92vw',
-          height: '100vh',
-          overflow: 'hidden',
-          boxShadow: '-12px 0 36px rgba(15, 23, 42, 0.10)',
-          display: 'flex',
-          flexDirection: 'column',
-          animation: 'nl-slide-in-right 0.28s cubic-bezier(0.2, 0.8, 0.2, 1)'
-        }}
+        className="nl-config-modal"
       >
         {/* 标题栏 */}
-        <div style={{
-          padding: '18px 24px',
-          background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-          color: '#fff',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          flexShrink: 0
-        }}>
-          <h3 style={{ margin: 0, fontSize: 18, fontWeight: 600 }}>🔮 演化法阵管理</h3>
+        <div className="nl-config-modal-header">
+          <h3>🔮 演化法阵管理</h3>
           <button
+            className="nl-config-modal-close"
             onClick={onClose}
             aria-label="关闭演化法阵"
-            style={{
-              background: 'rgba(255,255,255,0.2)',
-              border: 'none',
-              color: '#fff',
-              fontSize: 22,
-              cursor: 'pointer',
-              width: 32,
-              height: 32,
-              borderRadius: 6,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              transition: 'all 0.2s'
-            }}
-            onMouseOver={e => e.currentTarget.style.background = 'rgba(255,255,255,0.35)'}
-            onMouseOut={e => e.currentTarget.style.background = 'rgba(255,255,255,0.2)'}
           >
             ×
           </button>
         </div>
 
         {/* 内容区 */}
-        <div style={{ padding: '20px 24px 24px', overflowY: 'auto', flex: 1 }}>
+        <div className="nl-config-modal-body">
           {/* 表单区 */}
           <div style={{ background: C.surface2, padding: 24, borderRadius: 12, marginBottom: 24, border: `1px solid ${C.line}` }}>
             <h4 style={{ marginTop: 0, marginBottom: 20, fontSize: 16, fontWeight: 600, color: C.ink }}>
@@ -282,7 +239,7 @@ export default function LLMManager({ onClose }) {
           </div>
 
           {/* 模型列表 */}
-          <div>
+          <div style={{ paddingBottom: 16 }}>
             <h4 style={{ marginTop: 0, marginBottom: 16, fontSize: 16, fontWeight: 600, color: C.ink }}>
               已配置的模型
             </h4>
