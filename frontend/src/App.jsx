@@ -152,7 +152,6 @@ export default function App() {
   const [concurrency, setConcurrency] = useState(3);
   const [chapterSearchTerm, setChapterSearchTerm] = useState('');
   const [showChapterPicker, setShowChapterPicker] = useState(false);
-  const [timelineCollapsed, setTimelineCollapsed] = useState(false);
   const [showTimelineDrawer, setShowTimelineDrawer] = useState(false);
   const [showProjectDrawer, setShowProjectDrawer] = useState(false);
   const [showTaskDrawer, setShowTaskDrawer] = useState(false);
@@ -1191,61 +1190,18 @@ export default function App() {
               <button className="nl-left-drawer-close" onClick={() => setShowTimelineDrawer(false)} aria-label="关闭关系演化">×</button>
             </div>
             <div className="nl-left-drawer-body">
-              <section className={`nl-timeline ${timelineCollapsed ? 'collapsed' : ''}`}>
-                <header className="nl-tl-h" onClick={() => setTimelineCollapsed(v => !v)}>
-                  <div className="nl-tl-h-left">
-                    <div className="nl-tl-eyebrow">关系演化</div>
-                    <h3>{currentProject ? `${currentProject.name} · 全部章节` : '全部章节'}</h3>
-                  </div>
-                  <div className="nl-tl-h-right" onClick={e => e.stopPropagation()}>
-                    <div className="nl-seg">
-                      {VIEW_MODES.map(m => {
-                        // v2.4：抽屉里也跟随阈值显示
-                        const isMulti = m.id === VIEW_MODE_IDS.MULTI;
-                        const label = isMulti && s.viewMode === m.id
-                          ? `${s.minAppearances} 次起`
-                          : (m.label === '全部出现' ? '全部' : m.label === '多次出现' ? '多次' : '单次');
-                        return (
-                          <button
-                            key={m.id}
-                            className={s.viewMode === m.id ? 'active' : ''}
-                            onClick={() => s.setViewMode(m.id)}
-                          >{label}</button>
-                        );
-                      })}
-                    </div>
-                    <span className="nl-tl-ts">最近更新 {s.lastUpdateAt || '—'}</span>
-                    <button
-                      className="nl-pill"
-                      onClick={() => setTimelineCollapsed(v => !v)}
-                      title={timelineCollapsed ? '展开时间线' : '折叠时间线'}
-                    >
-                      {timelineCollapsed ? Icons.expand : Icons.collapse}
-                    </button>
-                  </div>
-                </header>
-                <div className="nl-tl-body">
-                  {timelineTracks.length === 0 ? (
-                    <div className="nl-tl-empty">
-                      {chapterOptions.length === 0
-                        ? '当前文本尚未识别章节标记；下方按关系整体轨迹展示，不伪造章节时间线。'
-                        : '尚未识别章节标记 — 显示全部关系轨迹，不伪造章节刻度。'}
-                      <div className="nl-tl-empty-sub">当前过滤条件下暂无关系轨迹。</div>
-                    </div>
-                  ) : (
-                    <RelationshipTimeline
-                      tracks={timelineTracks}
-                      viewMode={s.viewMode}
-                      onViewModeChange={s.setViewMode}
-                      chapterFilter={null}
-                      chapterOptions={graphChapterOptions}
-                      onChapterChange={() => {}}
-                      onSelectNode={s.setSelectedNodeId}
-                      selectedNodeLabel={selectedProfile?.label || ''}
-                    />
-                  )}
-                </div>
-              </section>
+              <RelationshipTimeline
+                tracks={timelineTracks}
+                viewMode={s.viewMode}
+                onViewModeChange={s.setViewMode}
+                chapterFilter={null}
+                chapterOptions={graphChapterOptions}
+                onChapterChange={() => {}}
+                onSelectNode={s.setSelectedNodeId}
+                selectedNodeLabel={selectedProfile?.label || ''}
+                projectName={currentProject?.name || ''}
+                updatedAt={s.lastUpdateAt || '—'}
+              />
             </div>
           </aside>
         </div>
