@@ -1105,6 +1105,41 @@ def get_chunk_metas(pid: str, chunk_size: int = 500, chapter_from: int = 0, chap
     }
 
 
+@app.get("/api/projects/{pid}/chapters", response_model=dict)
+def get_project_chapters(pid: str):
+    """v26.4：返回项目的章节范围（用于前端章节选择器）。
+
+    - 加载 project_text，按 Python 移植的章节识别扫描。
+    - 返回 { status, projectId, ranges: [{chapter, start}], count }。
+    - 项目不存在 → 404。
+    - 项目无原文 → 200 但 ranges=[]（不报错，让前端兜底）。
+    """
+    conn = get_db()
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM projects WHERE id=?", (pid,)
+        ).fetchone()
+        if not exists:
+            raise HTTPException(status_code=404, detail={
+                "status": "error", "error": "project_not_found",
+                "message": f"项目 {pid!r} 不存在",
+            })
+        row = conn.execute(
+            "SELECT text FROM project_text WHERE project_id=?", (pid,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row or not row["text"]:
+        return {"status": "success", "projectId": pid, "ranges": [], "count": 0}
+    ranges = _detect_chapter_ranges(row["text"])
+    return {
+        "status": "success",
+        "projectId": pid,
+        "ranges": ranges,
+        "count": len(ranges),
+    }
+
+
 def _grouped_duplicate_labels(conn, pid: str):
     """找出重名节点，并保证 id 拼接顺序稳定（方言兼容）。"""
     if sqlite3.sqlite_version_info >= (3, 44, 0):

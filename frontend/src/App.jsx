@@ -193,6 +193,7 @@ export default function App() {
     document.documentElement.setAttribute('data-theme', s.theme);
   }, [s.theme]);
 
+
   // 章节范围检测（文本章节，仅供 refine 切片用）
   // v26.1：仅粘贴路径前端持有全文；上传路径前端无原文，跳过检测（后端分析时自取）。
   useEffect(() => {
@@ -205,6 +206,14 @@ export default function App() {
     }
   }, [s.pastedText]);
 
+  // v26.4：上传路径下从后端拉取章节范围（项目切换或 textMeta 变化时触发）。
+  useEffect(() => {
+    if (!s.currentProjectId) return;
+    if ((s.pastedText || '').trim()) return;  // 粘贴路径已在前一个 useEffect 里处理
+    let cancelled = false;
+    s.fetchProjectChapters(s.currentProjectId);
+    return () => { cancelled = true; };
+  }, [s.currentProjectId, s.textMeta]);
   // v2.4：点击外部关闭阈值 popover
   useEffect(() => {
     if (!showThresholdPopover) return undefined;
@@ -274,17 +283,27 @@ export default function App() {
     [s.projects, s.currentProjectId]
   );
 
-  // 图上的章节（从边的 chapter 字段抽取 —— v26.2 起与文本章节分离）
-  const graphChapterOptions = useMemo(
-    () => getChapters(s.edges, []),
-    [s.edges]
-  );
 
   // 文本里的章节范围（给炼化切片 / 进度断点用）
   const chapterOptions = s.textChapterRanges?.length
     ? s.textChapterRanges.map(r => r.title || r.chapter || `第${r.index + 1}章`)
     : [];
 
+  // 图上的章节（从边的 chapter 字段抽取 —— v26.2 起与文本章节分离）
+  // v26.4：分析未完成时回退到文本章节（chapterSplitter 检测的），让 picker 在数据到达前可用。
+  const graphChapterOptions = useMemo(
+    () => {
+      const fromEdges = getChapters(s.edges, []);
+      return fromEdges.length > 0 ? fromEdges : chapterOptions;
+    },
+    [s.edges, chapterOptions]
+  );
+
+  // v26.4：根据实际章节命名推导术语（章/回），必须在 chapterOptions / graphChapterOptions 声明之后。
+  const chapterTerm = useMemo(() => {
+    const first = (graphChapterOptions[0] || chapterOptions[0] || '');
+    return first.includes('回') ? '回' : '章';
+  }, [graphChapterOptions, chapterOptions]);
   // 视图过滤后的边（多次/单次 = viewMode，X 次起阈值 = minAppearances）
   const viewEdges = useMemo(
     () => filterByViewMode(s.edges, s.viewMode, s.minAppearances),
@@ -383,12 +402,12 @@ export default function App() {
 
   // 章节范围按钮显示文本
   const chapterRangeLabel = useMemo(() => {
-    if (graphChapterOptions.length === 0) return '章节 1—?';
+    if (graphChapterOptions.length === 0) return `章节 1—?`;  // 占位，不会显示（按钮已不禁用）
     if (s.graphRange.from || s.graphRange.to) {
       const f = s.graphRange.from || 1;
       const t = s.graphRange.to || graphChapterOptions.length;
-      const fromName = graphChapterOptions[f - 1] || `第 ${f} 章`;
-      const toName = graphChapterOptions[t - 1] || `第 ${t} 章`;
+      const fromName = graphChapterOptions[f - 1] || `第 ${f} ${chapterTerm}`;
+      const toName = graphChapterOptions[t - 1] || `第 ${t} ${chapterTerm}`;
       const trim = (n) => n.length > 6 ? n.slice(0, 5) + '…' : n;
       return f === t ? `章节 ${trim(fromName)}` : `章节 ${trim(fromName)}…→${trim(toName)}…`;
     }
@@ -1095,7 +1114,7 @@ export default function App() {
               className="nl-pill"
               onClick={() => setShowChapterPicker(v => !v)}
               disabled={graphChapterOptions.length === 0}
-              title={graphChapterOptions.length === 0 ? '当前关系无章节标注' : '按章节过滤图谱'}
+              title={graphChapterOptions.length === 0 ? '导入文本后自动检测章节' : '按章节过滤图谱'}
             >
               {chapterRangeLabel}
             </button>
@@ -1109,7 +1128,7 @@ export default function App() {
                 />
                 <div className="nl-picker-cols">
                   <div className="nl-picker-col">
-                    <div className="nl-picker-col-title">起始章</div>
+                    <div className="nl-picker-col-title">起始{chapterTerm}</div>
                     {filteredChapterOptions.map((ch, i) => (
                       <div
                         key={`from-${i}`}
@@ -1119,7 +1138,7 @@ export default function App() {
                     ))}
                   </div>
                   <div className="nl-picker-col">
-                    <div className="nl-picker-col-title">终止章</div>
+                    <div className="nl-picker-col-title">终止{chapterTerm}</div>
                     {filteredChapterOptions.map((ch, i) => (
                       <div
                         key={`to-${i}`}

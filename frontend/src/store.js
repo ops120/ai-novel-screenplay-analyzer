@@ -6,7 +6,7 @@ import { getFailure, clearFailure } from './failureStore.js';
 // 加载配置
 const config = loadConfig();
 
-// v24.4.6：清除旧版 llm_config（迁移到 llmSelection.js）
+// v24.4.6：清除旧�?llm_config（迁移到 llmSelection.js�?
 try { localStorage.removeItem('llm_config'); } catch {}
 
 // 安装 task bridge（只一次）
@@ -27,9 +27,9 @@ export const useStore = create((set, get) => {
   installTaskBridge(set, get);
 
   return {
-  // ==================== 基础状态 ====================
+  // ==================== 基础状�?====================
   projects: [],
-  projectError: null,       // v22.1：项目列表加载错误
+  projectError: null,       // v22.1：项目列表加载错�?
   currentProjectId: null,
   nodes: [],
   edges: [],
@@ -51,11 +51,11 @@ export const useStore = create((set, get) => {
   // ==================== v21 主题 ====================
   theme: localStorage.getItem('storymap.theme') || 'ink',
 
-  // ==================== v26 图谱状态 ====================
+  // ==================== v26 图谱状�?====================
   viewMode: 'all',          // 'all' | 'merged' | 'unique'
-  minAppearances: 2,        // v2.4：X 次起阈值，仅 viewMode === 'merged' 时生效（2-10）
+  minAppearances: 2,        // v2.4：X 次起阈值，�?viewMode === 'merged' 时生效（2-10�?
   graphRange: { from: 0, to: 0 },  // 0 = 不限
-  graphScope: 'preview',    // 'preview' | 'all' | 'custom'；默认只渲染前 5 章
+  graphScope: 'preview',    // 'preview' | 'all' | 'custom'；默认只渲染�?5 �?
   edgeLabelLines: (() => {
     const v = parseInt(localStorage.getItem('storymap:edge-label-lines'), 10);
     return [1, 2, 3, 5].includes(v) ? v : 1;
@@ -97,21 +97,21 @@ export const useStore = create((set, get) => {
     saveConfig(cfg);
   },
 
-  // v21：主题
+  // v21：主�?
   setTheme: (theme) => {
     set({ theme });
     localStorage.setItem('storymap.theme', theme);
     document.documentElement.setAttribute('data-theme', theme);
   },
 
-  // v26：视图模式
+  // v26：视图模�?
   setViewMode: (mode) => set({ viewMode: mode }),
   setMinAppearances: (n) => {
     const v = Math.max(2, Math.min(10, Math.floor(Number(n) || 2)));
     set({ minAppearances: v });
   },
 
-  // v26：图谱范围
+  // v26：图谱范�?
   setGraphRange: (range) => set({ graphRange: range }),
   setGraphScope: (scope) => set({ graphScope: scope }),
 
@@ -125,14 +125,29 @@ export const useStore = create((set, get) => {
   // v26：选中节点
   setSelectedNodeId: (id) => set({ selectedNodeId: id }),
 
-  // v20：章节范围
+  // v20：章节范�?
   setChapterRange: (from, to) => set({ chapterFrom: from, chapterTo: to }),
   setTextChapterRanges: (ranges) => set({ textChapterRanges: ranges }),
 
   // v26.1
   setTextMeta: (meta) => set({ textMeta: meta }),
   setPastedText: (t) => set({ pastedText: t }),
-  clearTextState: () => set({ textMeta: null, pastedText: '' }),
+
+  // v26.4: Upload path - fetch chapters from backend.
+  fetchProjectChapters: async (pid) => {
+    if (!pid) return [];
+    try {
+      const r = await fetch(`${API_BASE}/projects/${pid}/chapters`);
+      const data = await r.json();
+      if (data.status === 'success') {
+        set({ textChapterRanges: data.ranges || [] });
+        return data.ranges || [];
+      }
+    } catch (e) {
+      console.warn('fetchProjectChapters failed:', e);
+    }
+    return [];
+  },  clearTextState: () => set({ textMeta: null, pastedText: '' }),
 
   uploadProjectText: async (projectId, text, encoding) => {
     if (!projectId) throw new Error('uploadProjectText: projectId required');
@@ -161,7 +176,7 @@ export const useStore = create((set, get) => {
     return res.json();
   },
 
-  // v24：任务管理 actions
+  // v24：任务管�?actions
   pauseTaskById: (id) => taskManager.pauseTask(id),
   resumeTaskById: (id) => taskManager.resumeTask(id),
   cancelTaskById: (id) => taskManager.cancelTask(id),
@@ -287,7 +302,7 @@ export const useStore = create((set, get) => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
 
-      // v24.4.6：检查是否仍是当前项目
+      // v24.4.6：检查是否仍是当前项�?
       if (get().currentProjectId !== currentId) return;
 
       const elapsed = Date.now() - startTime;
@@ -321,7 +336,7 @@ export const useStore = create((set, get) => {
       });
       if (res.status === 409) {
         const r = await res.json();
-        set({ projectError: `重名：${r.existing_id}` });
+        set({ projectError: `重名�?{r.existing_id}` });
         return;
       }
       const p = await res.json();
@@ -363,10 +378,10 @@ export const useStore = create((set, get) => {
     }
   },
 
-  // ==================== v24 炼化（走 taskManager）====================
+  // ==================== v24 炼化（走 taskManager�?===================
 
   analyzeText: async (text, concurrency = 3, chunkSizeOverride) => {
-    // v26.3：传 chunkSizeOverride 时优先使用（导入页面最新值），fallback 到 store 全局
+    // v26.3：传 chunkSizeOverride 时优先使用（导入页面最新值），fallback �?store 全局
     const { currentProjectId, currentLlmId, llmModels, systemPrompt, chapterFrom, chapterTo } = get();
     const chunkSize = chunkSizeOverride ?? get().chunkSize;
     if (!currentProjectId) return;
@@ -374,12 +389,12 @@ export const useStore = create((set, get) => {
 
     const selectedModel = llmModels.find(m => m.id === currentLlmId);
     if (!selectedModel) {
-      alert("请先在'模型管理'中配置并选择一个 LLM 模型");
+      alert("请先�?模型管理'中配置并选择一�?LLM 模型");
       return;
     }
 
     // v26.1：text=null 时不传全文到 taskManager
-    // v26.2：createAnalyzeTask 异步（text=null 时拉 chunk-metas）
+    // v26.2：createAnalyzeTask 异步（text=null 时拉 chunk-metas�?
     const task = await taskManager.createAnalyzeTask({
       projectId: currentProjectId,
       projectName: get().projects.find(p => p.id === currentProjectId)?.name || '',
@@ -434,7 +449,7 @@ export const useStore = create((set, get) => {
     let task;
     let chunkSize;
     try {
-      // v25 修复：从 progressStore 拉单条断点详情（含原文），createContinueTask 需要 progress 字段
+      // v25 修复：从 progressStore 拉单条断点详情（含原文），createContinueTask 需�?progress 字段
       const { getProgress } = await import('./progressStore.js');
       const progress = await getProgress(currentProjectId);
       if (!progress) {
@@ -443,11 +458,11 @@ export const useStore = create((set, get) => {
       }
       chunkSize = progress.chunkSize;
       if (!Number.isFinite(chunkSize) || chunkSize <= 0) {
-        alert('断点记录缺少有效的 chunkSize，请重新发起分析');
+        alert('断点记录缺少有效�?chunkSize，请重新发起分析');
         return;
       }
 
-      // v26.2：createContinueTask 异步（progress.text 为空时拉 chunk-metas）
+      // v26.2：createContinueTask 异步（progress.text 为空时拉 chunk-metas�?
       task = await taskManager.createContinueTask({
       projectId: currentProjectId,
       projectName: get().projects.find(p => p.id === currentProjectId)?.name || '',
@@ -484,7 +499,7 @@ export const useStore = create((set, get) => {
       set({ isAnalyzing: true, progress: 0, isPaused: false });
     } catch (err) {
       console.error('continueAnalysis failed:', err);
-      alert('继续分析失败：' + (err?.message || err));
+      alert('继续分析失败：'+ (err?.message || err));
     }
   },
 
@@ -497,7 +512,7 @@ export const useStore = create((set, get) => {
     const selectedModel = llmModels.find(m => m.id === currentLlmId);
     if (!selectedModel) return;
 
-    // v26.2：createRetryFailedTask 异步（failure.text 为空时拉 chunk-metas）
+    // v26.2：createRetryFailedTask 异步（failure.text 为空时拉 chunk-metas�?
     const task = await taskManager.createRetryFailedTask({
       projectId: currentProjectId,
       projectName: get().projects.find(p => p.id === currentProjectId)?.name || '',
@@ -536,7 +551,7 @@ export const useStore = create((set, get) => {
     set({ isAnalyzing: true, progress: 0, isPaused: false });
   },
 
-  // v20：暂停/继续
+  // v20：暂�?继续
   pauseAnalysis: () => {
     const { tasks } = get();
     const active = tasks.find(t => t.status === 'running');
