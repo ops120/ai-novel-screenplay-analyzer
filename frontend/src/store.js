@@ -62,6 +62,10 @@ export const useStore = create((set, get) => {
   })(),
   selectedNodeId: null,
 
+  // v26.1
+  textMeta: null,
+  pastedText: '',
+
   // ==================== v20 章节范围 ====================
   chapterFrom: 0,
   chapterTo: 0,
@@ -124,6 +128,38 @@ export const useStore = create((set, get) => {
   // v20：章节范围
   setChapterRange: (from, to) => set({ chapterFrom: from, chapterTo: to }),
   setTextChapterRanges: (ranges) => set({ textChapterRanges: ranges }),
+
+  // v26.1
+  setTextMeta: (meta) => set({ textMeta: meta }),
+  setPastedText: (t) => set({ pastedText: t }),
+  clearTextState: () => set({ textMeta: null, pastedText: '' }),
+
+  uploadProjectText: async (projectId, text, encoding) => {
+    if (!projectId) throw new Error('uploadProjectText: projectId required');
+    if (typeof text !== 'string' || !text.length) {
+      throw new Error('uploadProjectText: text required and non-empty');
+    }
+    const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/text`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, encoding: encoding || 'utf-8' }),
+    });
+    if (!res.ok) {
+      let detail = '';
+      try { detail = JSON.stringify(await res.json()); } catch { /* ignore */ }
+      throw new Error(`HTTP ${res.status} ${detail}`);
+    }
+    const r = await res.json();
+    return { chars: r.chars, encoding: r.encoding, updatedAt: r.updatedAt || Date.now() };
+  },
+
+  fetchProjectText: async (projectId) => {
+    if (!projectId) return null;
+    const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/text`);
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  },
 
   // v24：任务管理 actions
   pauseTaskById: (id) => taskManager.pauseTask(id),
@@ -241,6 +277,8 @@ export const useStore = create((set, get) => {
       selectedNodeId: null,
       graphRange: { from: 0, to: 0 },
       graphScope: 'preview',
+      textMeta: null,    // v26.1
+      pastedText: '',    // v26.1
     });
 
     const startTime = Date.now();
@@ -327,9 +365,12 @@ export const useStore = create((set, get) => {
 
   // ==================== v24 炼化（走 taskManager）====================
 
-  analyzeText: async (fullText, concurrency = 3) => {
-    const { currentProjectId, currentLlmId, llmModels, systemPrompt, chunkSize, chapterFrom, chapterTo } = get();
-    if (!currentProjectId || !fullText.trim()) return;
+  analyzeText: async (text, concurrency = 3, chunkSizeOverride) => {
+    // v26.3：传 chunkSizeOverride 时优先使用（导入页面最新值），fallback 到 store 全局
+    const { currentProjectId, currentLlmId, llmModels, systemPrompt, chapterFrom, chapterTo } = get();
+    const chunkSize = chunkSizeOverride ?? get().chunkSize;
+    if (!currentProjectId) return;
+    if (text != null && !text.trim()) return;
 
     const selectedModel = llmModels.find(m => m.id === currentLlmId);
     if (!selectedModel) {
@@ -337,13 +378,15 @@ export const useStore = create((set, get) => {
       return;
     }
 
-    const task = taskManager.createAnalyzeTask({
+    // v26.1：text=null 时不传全文到 taskManager
+    // v26.2：createAnalyzeTask 异步（text=null 时拉 chunk-metas）
+    const task = await taskManager.createAnalyzeTask({
       projectId: currentProjectId,
       projectName: get().projects.find(p => p.id === currentProjectId)?.name || '',
       modelName: selectedModel.name,
       modelId: currentLlmId,
       systemPrompt,
-      text: fullText,
+      text: text,  // null = 后端加载
       chunkSize,
       concurrency,
       chapterFrom: chapterFrom || undefined,
@@ -382,17 +425,30 @@ export const useStore = create((set, get) => {
   },
 
   continueAnalysis: async () => {
-    const { currentProjectId, currentLlmId, llmModels, systemPrompt, chunkSize } = get();
+    const { currentProjectId, currentLlmId, llmModels, systemPrompt } = get();
     if (!currentProjectId) return;
 
     const selectedModel = llmModels.find(m => m.id === currentLlmId);
     if (!selectedModel) return;
 
-    // v25 修复：从 progressStore 拉单条断点详情（含原文），createContinueTask 需要 progress 字段
-    const { getProgress } = await import('./progressStore.js');
-    const progress = await getProgress(currentProjectId);
+    let task;
+    let chunkSize;
+    try {
+      // v25 修复：从 progressStore 拉单条断点详情（含原文），createContinueTask 需要 progress 字段
+      const { getProgress } = await import('./progressStore.js');
+      const progress = await getProgress(currentProjectId);
+      if (!progress) {
+        alert('未找到断点记录，请重新发起分析');
+        return;
+      }
+      chunkSize = progress.chunkSize;
+      if (!Number.isFinite(chunkSize) || chunkSize <= 0) {
+        alert('断点记录缺少有效的 chunkSize，请重新发起分析');
+        return;
+      }
 
-    const task = taskManager.createContinueTask({
+      // v26.2：createContinueTask 异步（progress.text 为空时拉 chunk-metas）
+      task = await taskManager.createContinueTask({
       projectId: currentProjectId,
       projectName: get().projects.find(p => p.id === currentProjectId)?.name || '',
       modelName: selectedModel.name,
@@ -402,40 +458,47 @@ export const useStore = create((set, get) => {
       progress,
     });
 
-    if (!task) {
-      alert('该项目已有进行中的任务');
-      return;
-    }
+      if (!task) {
+        alert('该项目已有进行中的任务');
+        return;
+      }
 
-    const unsub = taskManager.subscribeTask(task.id, (t) => {
-      set({
-        runStats: { successCount: t.successCount, failedCount: t.failedCount, totalChunks: t.total },
-        activeProgress: { completed: t.completed, total: t.total, failedCount: t.failedCount, rateLimitCount: t.rateLimitCount, degraded: t.degraded },
-        isPaused: t.status === 'paused',
-        progress: t.total > 0 ? Math.round((t.completed / t.total) * 100) : 0,
+      const unsub = taskManager.subscribeTask(task.id, (t) => {
+        set({
+          runStats: { successCount: t.successCount, failedCount: t.failedCount, totalChunks: t.total },
+          activeProgress: { completed: t.completed, total: t.total, failedCount: t.failedCount, rateLimitCount: t.rateLimitCount, degraded: t.degraded },
+          isPaused: t.status === 'paused',
+          progress: t.total > 0 ? Math.round((t.completed / t.total) * 100) : 0,
+        });
+
+        if (['completed', 'failed', 'cancelled'].includes(t.status)) {
+          set({ isAnalyzing: false, progress: 0, activeProgress: null });
+          unsub();
+          if (t.status === 'completed') get().selectProject(currentProjectId);
+          if (t.failedChunks?.length) {
+            set({ lastFailure: { chunks: t.failedChunks, totalChunks: t.total, chunkSize } });
+          }
+        }
       });
 
-      if (['completed', 'failed', 'cancelled'].includes(t.status)) {
-        set({ isAnalyzing: false, progress: 0, activeProgress: null });
-        unsub();
-        if (t.status === 'completed') get().selectProject(currentProjectId);
-        if (t.failedChunks?.length) {
-          set({ lastFailure: { chunks: t.failedChunks, totalChunks: t.total, chunkSize } });
-        }
-      }
-    });
-
-    set({ isAnalyzing: true, progress: 0, isPaused: false });
+      set({ isAnalyzing: true, progress: 0, isPaused: false });
+    } catch (err) {
+      console.error('continueAnalysis failed:', err);
+      alert('继续分析失败：' + (err?.message || err));
+    }
   },
 
   retryFailedChunks: async () => {
-    const { currentProjectId, currentLlmId, llmModels, systemPrompt, chunkSize, lastFailure } = get();
+    const { currentProjectId, currentLlmId, llmModels, systemPrompt, lastFailure } = get();
     if (!currentProjectId || !lastFailure?.chunks?.length) return;
+    const chunkSize = lastFailure.chunkSize;
+    if (!Number.isFinite(chunkSize) || chunkSize <= 0) return;
 
     const selectedModel = llmModels.find(m => m.id === currentLlmId);
     if (!selectedModel) return;
 
-    const task = taskManager.createRetryFailedTask({
+    // v26.2：createRetryFailedTask 异步（failure.text 为空时拉 chunk-metas）
+    const task = await taskManager.createRetryFailedTask({
       projectId: currentProjectId,
       projectName: get().projects.find(p => p.id === currentProjectId)?.name || '',
       modelName: selectedModel.name,

@@ -57,7 +57,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ConfigDict, AliasChoices, ValidationError, field_validator
 from openai import OpenAI
 from typing import Optional, List, Any
-import sqlite3, secrets, json, re, os, asyncio, base64, hashlib, socket
+import sqlite3, secrets, json, re, os, asyncio, base64, hashlib, socket, time
 
 # v25-fix：大文本进度断点改用本地持久化（替换浏览器 localStorage 5MB 配额）。
 # 需要写入原始文本（999 测试约 15MB，未来长卷可达 30MB+），所以 PUT /api/task-progress/{id}
@@ -112,7 +112,8 @@ def _body_size_limit_for(request: Request) -> int:
     单独的 URL 前缀匹配避免误伤：仅该路径的 PUT 走大通道，POST/DELETE 仍走 10MB。
     """
     if (request.method == "PUT"
-            and request.url.path.startswith("/api/task-progress/")):
+            and (request.url.path.startswith("/api/task-progress/")
+                 or request.url.path.endswith("/text"))):
         return SPECIAL_LARGE_PUT_LIMIT_BYTES
     return MAX_BODY_BYTES
 
@@ -292,6 +293,17 @@ def init_db():
         # schema 由 progress_repository 维护，避免散落在多处。
         progress_repository.init_progress_schema(conn)
 
+        # v26.1：项目原文表——导入的大文本只上传一次，前端不持有全文。
+        # FK ON DELETE CASCADE 跟随 projects，删项目时同步清掉原文。
+        conn.execute('''CREATE TABLE IF NOT EXISTS project_text (
+            project_id TEXT PRIMARY KEY,
+            text TEXT NOT NULL,
+            encoding TEXT NOT NULL DEFAULT 'utf-8',
+            chars INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )''')
+
         # ---------- v9.1-Fix-2：启动自检（PRAGMA 实际值，不是「我们设过了」） ----------
         journal = conn.execute("PRAGMA journal_mode").fetchone()[0]
         if str(journal).lower() != "wal":
@@ -352,7 +364,9 @@ class AnalyzeRequest(BaseModel):
     确保「未标注章节」徽章不会因为 LLM 偷懒而泛滥。
     """
     model_config = ConfigDict(extra="ignore")
-    text: str = Field(..., max_length=200_000)
+    # 文本可空：前端只传 project_id 时由后端从 project_text 加载；
+    # 粘贴/小文本场景仍然可以走旧路径（直接带 text 字段）
+    text: str = Field("", max_length=200_000)
     model_id: str = Field(..., min_length=1, max_length=128)
     system_prompt: str = Field("", max_length=20_000)
     chunk_index: int = Field(0, ge=0, le=100_000)
@@ -657,6 +671,160 @@ async def _analyze_with_llm(req: AnalyzeRequest) -> AnalyzeResponse:
     })
 
 
+def _load_project_text(pid: str) -> str:
+    """v26.1：读取项目原文。导入大文本后分析/续跑都走这条路径；
+    若项目从未导入原文 → 404。"""
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT text FROM project_text WHERE project_id=?", (pid,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={
+                "status": "error", "error": "project_text_not_found",
+                "message": f"项目 {pid!r} 尚未导入原文，可粘贴小文本或先调用 PUT /api/projects/{{pid}}/text",
+            })
+        return row['text']
+    finally:
+        conn.close()
+
+
+
+# ==================== v26.2 章节识别（与 frontend/src/chapterSplitter.js 100% 对齐）====================
+# 移植自 JS chapterSplitter.js，保证后端切片元数据与前端章节边界一致。
+# 前端章节边界 = JS detectChapterRanges 输出（小文本/粘贴路径走老逻辑）。
+# 大文本路径下，前端不再持有全文，必须由后端按相同规则计算 chunkMetas 与切片。
+
+_ZH_NUM = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"]
+
+_CHAPTER_PATTERNS = [
+    r"^[^\n]{0,30}?第([零〇一二三四五六七八九十百千]+)章[ 　 ]*([^\n\r]{0,30})",
+    r"^[^\n]{0,30}?第([零〇一二三四五六七八九十百千]+)回[ 　 ]*([^\n\r]{0,30})",
+    r"^[^\n]{0,30}?(序章|序言)[ 　 ]*([^\n\r]{0,30})?",
+    r"^[^\n]{0,30}?序[ 　 ]*([^\n\r]{0,30})?",
+    r"^[^\n]{0,30}?(楔子|引子|终章)[ 　 ]*([^\n\r]{0,30})?",
+]
+
+
+def _normalize_num(zh):
+    """JS normalizeNum：第零章/〇 章 → 第一章（防 LLM 误读）。"""
+    if not zh:
+        return zh
+    if zh in ("零", "〇"):
+        return "一"
+    return zh
+
+
+def _format_chapter(match_text, group1, group2):
+    """v26.4：与 JS chapterSplitter 保持一致。
+    第N章/回 可能带《》目录 前缀，所以不再依赖 match_text 的开头位置，
+    而是用正则重抓「第+数字+章/回」位置，再切片出标题。
+    """
+    import re as _re
+    m = _re.search(r"第([零〇一二三四五六七八九十百千]+)([章回])", match_text)
+    if m:
+        num = _normalize_num(m.group(1))
+        tag = m.group(2)
+        title = match_text[m.end():].strip()
+        return f"第{num}{tag} {title}" if title else f"第{num}{tag}"
+    # 序/序章/序言：从去前缀后的 body 判 tag
+    import re as _re2
+    body = _re2.sub(r"^[^\n]{0,30}?", "", match_text)
+    if body.startswith("序"):
+        if body.startswith(("序章", "序言")):
+            tag = body[:2]
+        else:
+            tag = "序"
+        title = body[len(tag):].strip()
+        return f"{tag} {title}" if title else tag
+    # 楔子/引子/终章 等
+    tag = body[:2]
+    title = (group1 or "").strip()
+    return f"{tag} {title}" if title else tag
+
+
+def _detect_chapter_ranges(text):
+    """JS detectChapterRanges 的 Python 移植。
+    返回 [{chapter, start}]，按 start 升序去重；空文本返 []。
+    """
+    if not isinstance(text, str) or not text:
+        return []
+    import re as _re
+    matches = []
+    for pattern in _CHAPTER_PATTERNS:
+        regex = _re.compile(pattern, _re.MULTILINE)
+        for m in regex.finditer(text):
+            chapter = _format_chapter(m.group(0), m.group(1), m.group(2) if m.lastindex and m.lastindex >= 2 else None)
+            chapter = _re.sub(r"\s+", " ", chapter).strip()
+            if not chapter:
+                continue
+            matches.append({"chapter": chapter, "start": m.start()})
+    if not matches:
+        return []
+    matches.sort(key=lambda x: x["start"])
+    dedup = []
+    for m in matches:
+        if not dedup or m["start"] > dedup[-1]["start"]:
+            dedup.append(m)
+    return dedup
+
+
+def _get_chapter_for_chunk(chunk_index, chunk_size, ranges):
+    """v26.4：与 JS getChapterForChunk 保持一致。
+    chunkStart = chunk_index * chunk_size（与 for-loop 100% 对齐）。
+    chunkStart 在第一个章节之前时（如文件头/前言），默认用第一章。
+    """
+    if not isinstance(chunk_index, int) or chunk_index < 0:
+        return ""
+    if not isinstance(chunk_size, int) or chunk_size <= 0:
+        return ""
+    if not ranges:
+        return ""
+    chunk_start = chunk_index * chunk_size
+    # v26.4：chunkStart < 第一个章节 start 时默认用第一章
+    if chunk_start < ranges[0]["start"]:
+        return ranges[0]["chapter"]
+    current = ""
+    for r in ranges:
+        if r["start"] <= chunk_start:
+            current = r["chapter"]
+        else:
+            break
+    return current
+
+
+def _compute_chunk_index_by_chapter(ranges, chunk_start, chapter_from, chapter_to):
+    """JS buildChunks 章节过滤：chunk 起点所在章节序号在 [from, to] 内才保留。
+    chapter_from/to 为 0 或空表示不限。
+    返回章节序号（1 起，0 表示无章节）。
+    """
+    if not ranges:
+        return 0
+    chapter_idx = 0
+    for i, r in enumerate(ranges):
+        if r["start"] <= chunk_start:
+            chapter_idx = i + 1
+        else:
+            break
+    return chapter_idx
+
+
+class ProjectTextIn(BaseModel):
+    """v26.1：PUT /api/projects/{pid}/text 入参。原文大小上限 64MB（与进度断点对齐）。"""
+    model_config = ConfigDict(extra="ignore")
+    text: str = Field(..., min_length=1, max_length=64_000_000)
+    encoding: str = Field("utf-8", max_length=32)
+
+
+class ProjectTextOut(BaseModel):
+    """v26.1：GET /api/projects/{pid}/text 响应（前端预览用，按需取前 1-2 万字更轻）。"""
+    projectId: str
+    text: str
+    chars: int
+    encoding: str
+    updatedAt: int
+
+
 def _canonical_direction(source: str, target: str, label_of: dict):
     """按人物名字典序规范化边方向——A→B 和 B→A 落到同一条边。"""
     a = (label_of.get(source, source), source)
@@ -810,6 +978,133 @@ def get_data(pid: str):
     return {"nodes": nodes, "edges": valid_edges}
 
 
+# ==================== v26.1 项目原文（导入只上传一次） ====================
+
+@app.put("/api/projects/{pid}/text", response_model=dict)
+def put_project_text(pid: str, body: ProjectTextIn):
+    """v26.1：上传项目原文。前端只持 meta；分析/续跑按 project_id 走 project_text。
+
+    - 64MB 字节上限（与 task-progress 通道一致；中文 UTF-8 ≈ 2200w 字符）
+    - 若项目不存在 → 404（FK 不会静默吃掉，由路由显式校验）
+    - 重复 PUT：覆盖式 UPSERT
+    """
+    conn = get_db()
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM projects WHERE id=?", (pid,)
+        ).fetchone()
+        if not exists:
+            raise HTTPException(status_code=404, detail={
+                "status": "error", "error": "project_not_found",
+                "message": f"项目 {pid!r} 不存在",
+            })
+        chars = len(body.text)
+        conn.execute('''
+            INSERT INTO project_text (project_id, text, encoding, chars, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(project_id) DO UPDATE SET
+                text=excluded.text,
+                encoding=excluded.encoding,
+                chars=excluded.chars,
+                updated_at=excluded.updated_at
+        ''', (pid, body.text, body.encoding or "utf-8", chars, int(time.time() * 1000)))
+        conn.commit()
+    finally:
+        conn.close()
+    return {
+        "status": "success",
+        "projectId": pid,
+        "chars": chars,
+        "encoding": body.encoding,
+        "updatedAt": int(time.time() * 1000),
+    }
+
+
+@app.get("/api/projects/{pid}/text", response_model=ProjectTextOut)
+def get_project_text(pid: str):
+    """v26.1：读取项目原文（按需拉取，前端不应默认持有全文）。"""
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT text, encoding, chars, updated_at FROM project_text WHERE project_id=?",
+            (pid,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail={
+            "status": "error", "error": "project_text_not_found",
+            "message": f"项目 {pid!r} 尚未导入原文",
+        })
+    return ProjectTextOut(
+        projectId=pid,
+        text=row['text'],
+        chars=row['chars'],
+        encoding=row['encoding'],
+        updatedAt=row['updated_at'],
+    )
+
+
+@app.get("/api/projects/{pid}/chunk-metas", response_model=dict)
+def get_chunk_metas(pid: str, chunk_size: int = 500, chapter_from: int = 0, chapter_to: int = 0):
+    """v26.2：大文本模式切片元数据。前端只持 meta，按 chunkIndex 增量请求。
+
+    - 加载 project_text，按 Python 移植的章节识别（与 JS chapterSplitter.js 100% 对齐）扫描 chapters。
+    - 计算 total = ceil(chars / chunk_size)；chapter_from/chapter_to 过滤后保留在范围内的 chunkIndex。
+    - 返回 { status, total, chunkSize, chars, chunkMetas: [{chunkIndex, chapter}] }（不含文本）。
+    - 项目不存在或未导入原文 → 404。
+    """
+    safe_chunk_size = max(1, min(int(chunk_size), 20000))
+    safe_from = int(chapter_from) if chapter_from else 0
+    safe_to = int(chapter_to) if chapter_to else 0
+
+    conn = get_db()
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM projects WHERE id=?", (pid,)
+        ).fetchone()
+        if not exists:
+            raise HTTPException(status_code=404, detail={
+                "status": "error", "error": "project_not_found",
+                "message": f"项目 {pid!r} 不存在",
+            })
+        row = conn.execute(
+            "SELECT text, chars FROM project_text WHERE project_id=?", (pid,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail={
+            "status": "error", "error": "project_text_not_found",
+            "message": f"项目 {pid!r} 尚未导入原文",
+        })
+
+    full_text = row['text']
+    chars = row['chars'] or len(full_text)
+    ranges = _detect_chapter_ranges(full_text)
+    total = (chars + safe_chunk_size - 1) // safe_chunk_size
+
+    metas = []
+    for idx in range(total):
+        chunk_start = idx * safe_chunk_size
+        chapter_idx = _compute_chunk_index_by_chapter(ranges, chunk_start, safe_from, safe_to)
+        if safe_from and chapter_idx and chapter_idx < safe_from:
+            continue
+        if safe_to and chapter_idx and chapter_idx > safe_to:
+            continue
+        chapter = _get_chapter_for_chunk(idx, safe_chunk_size, ranges)
+        metas.append({"chunkIndex": idx, "chapter": chapter})
+
+    return {
+        "status": "success",
+        "projectId": pid,
+        "total": total,
+        "chunkSize": safe_chunk_size,
+        "chars": chars,
+        "chunkMetas": metas,
+    }
+
+
 def _grouped_duplicate_labels(conn, pid: str):
     """找出重名节点，并保证 id 拼接顺序稳定（方言兼容）。"""
     if sqlite3.sqlite_version_info >= (3, 44, 0):
@@ -915,6 +1210,27 @@ async def analyze(pid: str, req: AnalyzeRequest):
     try:
         # 提前校验：避免拿不到密钥还白等超时
         _lookup_llm_model(req.model_id)
+
+        # v26.2：text 为空时按 chunk_index × chunk_size 从 project_text 切片，
+        # 避免把整篇原文塞进单次 LLM 调用（必然爆上下文/超时）。
+        # chunk_chapter 为空时由后端按 ranges 推导。粘贴小文本兼容老路径（text 非空则不切片）。
+        if not (req.text or "").strip():
+            loaded = _load_project_text(pid)
+            if not req.chunk_size or req.chunk_size <= 0:
+                raise HTTPException(status_code=400, detail={
+                    "status": "error", "error": "missing_chunk_size",
+                    "message": "大文本模式必须带 chunk_size（前端用 /chunk-metas 拿）",
+                })
+            slice_start = req.chunk_index * req.chunk_size
+            slice_end = slice_start + req.chunk_size
+            chunk_text = loaded[slice_start:slice_end]
+            # 章节前缀（与 JS splitTextWithChapterContext 完全一致）
+            if not (req.chunk_chapter or "").strip():
+                ranges = _detect_chapter_ranges(loaded)
+                req = req.model_copy(update={"chunk_chapter": _get_chapter_for_chunk(req.chunk_index, req.chunk_size, ranges)})
+            prefix = f"[当前章节：{req.chunk_chapter}]" if req.chunk_chapter else "[当前章节：未知]"
+            sliced = f"{prefix}\n{chunk_text}" if chunk_text else prefix
+            req = req.model_copy(update={"text": sliced})
 
         # Fix-7：整个请求（含重试）不超过 LLM_REQUEST_TIMEOUT；
         # 显式 acquire/release 配合 try/finally，超时路径也保证 semaphore 归零。
@@ -1209,7 +1525,9 @@ class TaskProgressIn(BaseModel):
     totalChunks: int = Field(..., ge=0, le=10_000_000)
     lastCompleted: int = Field(0, ge=0, le=10_000_000)
     # text：64MB 字节上限下，最坏 UTF-8 中文字符约 2200w；Field 限 3000w 给余量。
-    text: str = Field(..., max_length=30_000_000)
+    # text 改为可空（断点续跑不再依赖前端持有原文；为空时由后端从 project_text 加载）。
+    # 保留 30MB 上限：粘贴/小文本兼容老路径 + 兼容性读（已有记录仍可读）。
+    text: str = Field("", max_length=30_000_000)
     chunkSize: int = Field(..., ge=1, le=20_000)
     concurrency: int = Field(3, ge=1, le=8)
     llmModelName: str = Field("", max_length=200)

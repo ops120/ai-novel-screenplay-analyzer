@@ -103,10 +103,19 @@ export async function listProgress() {
  * @param {AbortSignal} [signal] 外部取消信号。任务被 abort 时透传，让 fire-and-forget
  *        路径的 onProgress 也能被取消，避免「任务已取消还在写断点」的诡异副作用。
  */
+// v26.1：PATCH 节流 —— 简单去重：相同 lastCompleted 跳过 fetch。
+// 任务高并发时 onProgress 频繁触发（每片都 PATCH 一次 → 网络抖动 + 后端 WAL 写放大）；
+// 实际上同一片只需 PATCH 一次就够了。后端用 MAX(lastCompleted) 不回退，所以省略中间值不影响。
+const _lastPatched = new Map();
+
 export async function updateProgress(projectId, patch, signal) {
   if (!projectId) throw new Error('updateProgress: projectId 必填');
   if (!patch || typeof patch.lastCompleted !== 'number') {
     throw new Error('updateProgress: payload.lastCompleted 必填');
+  }
+  const last = _lastPatched.get(projectId);
+  if (last !== undefined && last === patch.lastCompleted) {
+    return { status: 'success', projectId, throttled: true };
   }
   const res = await fetch(endpoint(projectId), {
     method: 'PATCH',
@@ -114,7 +123,9 @@ export async function updateProgress(projectId, patch, signal) {
     body: JSON.stringify({ lastCompleted: patch.lastCompleted }),
     ...(signal ? { signal } : {}),
   });
-  return readJsonOrThrow(res);
+  const out = await readJsonOrThrow(res);
+  _lastPatched.set(projectId, patch.lastCompleted);
+  return out;
 }
 
 /**
@@ -122,8 +133,8 @@ export async function updateProgress(projectId, patch, signal) {
  */
 export async function clearProgress(projectId) {
   if (!projectId) return;
+  _lastPatched.delete(projectId);
   const res = await fetch(endpoint(projectId), { method: 'DELETE' });
-  // 404 表示「本来就没有」——视为成功，避免无意义的重试。
   if (res.status === 404) return { status: 'success', projectId };
   return readJsonOrThrow(res);
 }

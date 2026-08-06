@@ -167,3 +167,34 @@ test('splitTextWithChapterContext：chunkSize 不是数字时回退到默认 500
   // chunkSize 退到 500 → ceil(1509/500) = 4 片
   assert.equal(chunks.length, 4);
 });
+// v26.4：识别《》目录 前缀的「第N回」格式（如西游记）。
+test('detectChapterRanges：识别《》目录 第N回 前缀（西游记格式）', () => {
+  const text = '《西游记》\n《》目录 第一回　灵根育孕源流出　心性修持大道生\n   诗曰：\n   混沌未分天地乱。\n' + '《》目录 第二回　悟彻菩提真妙理　断魔归本合元神\n   话表美猴王。';
+  const ranges = detectChapterRanges(text);
+  assert.equal(ranges.length, 2);
+  assert.match(ranges[0].chapter, /^第一回 灵根育孕源流出/);
+  assert.match(ranges[1].chapter, /^第二回 悟彻菩提真妙理/);
+});
+
+test('detectChapterRanges：识别《》目录 第N章 前缀（双字节空格/全角空格）', () => {
+  const text = '《》目录　第一章　开端\n正文\n《》目录　第二章　发展\n正文继续';
+  const ranges = detectChapterRanges(text);
+  assert.equal(ranges.length, 2);
+  assert.match(ranges[0].chapter, /^第一章 开端$/);
+  assert.match(ranges[1].chapter, /^第二章 发展$/);
+});
+
+test('detectChapterRanges：缩进式章节（前导空格）', () => {
+  const text = '    第一章 缩进章节\n   一些内容\n    第二章 下一章';
+  const ranges = detectChapterRanges(text);
+  assert.equal(ranges.length, 2);
+});
+
+test('getChapterForChunk：chunkStart 在第一个章节之前时默认返回第一章', () => {
+  // 文件头 100 字符是前言（占一行），换行后是第一章正文。
+  const text = 'x'.repeat(100) + '\n\n第一章 内容\n' + 'y'.repeat(5000);
+  const ranges = detectChapterRanges(text);
+  assert.equal(ranges.length, 1);
+  // chunkSize=500, chunkIndex=0 → chunkStart=0 → 应当落到第一章
+  assert.equal(getChapterForChunk(0, 500, text, ranges), '第一章 内容');
+});

@@ -10,14 +10,15 @@
 const ZH_NUM = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九'];
 
 // 章节识别规则（按优先级）。匹配组：第 1 组为可省略的章节号，第 2 组为标题。
+// v26.4：放宽行首约束，允许 0–30 字符前缀（覆盖《》目录、全角空格、缩进等 TOC 标记）。
+// 西游记用「《》目录 第N回 标题」格式，原本要求"第"必须在行首 → 0 匹配。
 const CHAPTER_PATTERNS = [
-  /^第([零〇一二三四五六七八九十百千]+)章[ 　　]*([^\n\r]{0,30})/,
-  /^第([零〇一二三四五六七八九十百千]+)回[ 　　]*([^\n\r]{0,30})/,
-  /^(序章|序言)[ 　　]*([^\n\r]{0,30})?/,
-  /^序[ 　　]*([^\n\r]{0,30})?/,
-  /^(楔子|引子|终章)[ 　　]*([^\n\r]{0,30})?/,
+  /^[^\n]{0,30}?第([零〇一二三四五六七八九十百千]+)章[ 　　]*([^\n\r]{0,30})/,
+  /^[^\n]{0,30}?第([零〇一二三四五六七八九十百千]+)回[ 　　]*([^\n\r]{0,30})/,
+  /^[^\n]{0,30}?(序章|序言)[ 　　]*([^\n\r]{0,30})?/,
+  /^[^\n]{0,30}?序[ 　　]*([^\n\r]{0,30})?/,
+  /^[^\n]{0,30}?(楔子|引子|终章)[ 　　]*([^\n\r]{0,30})?/,
 ];
-
 function normalizeNum(zh) {
   if (!zh) return zh;
   if (zh === '零' || zh === '〇') return '一';  // 第零章 → 第一章（防 LLM 误读）
@@ -25,21 +26,24 @@ function normalizeNum(zh) {
 }
 
 function formatChapter(match) {
-  if (/^第/.test(match[0])) {
-    const num = normalizeNum(match[1]);
-    // 用「数字后紧跟的字符」判定章/回，而不是搜索标题里的「回」字。
-    // 例如「第一章 回访故乡」若用 /第.+回/ 会误判成「第一回」。
-    // 「第」占 1 位，数字占 match[1].length 位，紧跟的字符就是章/回。
-    const tag = match[0].charAt(1 + match[1].length) === '回' ? '回' : '章';
-    const title = (match[2] || '').trim();
+  // v26.4：第N章/回 可能带《》目录 前缀。用正则重抓「第+数字+章/回」位置，
+  // 避免依赖 match[0] 的绝对偏移，也避开「序」前缀模式误吃到第N章。
+  const head = /第([零〇一二三四五六七八九十百千]+)([章回])/.exec(match[0]);
+  if (head) {
+    const num = normalizeNum(head[1]);
+    const tag = head[2];
+    const title = match[0].slice(head.index + head[0].length).trim();
     return title ? `第${num}${tag} ${title}` : `第${num}${tag}`;
   }
-  if (/^序/.test(match[0])) {
-    const tag = match[0].startsWith('序章') || match[0].startsWith('序言') ? match[0].slice(0, 2) : '序';
-    const title = (match[1] || '').trim();
+  // 序/序章/序言：从去前缀后的 body 判 tag，避免「第零章 序」被误归到序分支。
+  const body = match[0].replace(/^[^\n]{0,30}?/, '');
+  if (/^序/.test(body)) {
+    const tag = body.startsWith('序章') || body.startsWith('序言') ? body.slice(0, 2) : '序';
+    const title = body.slice(tag.length).trim();
     return title ? `${tag} ${title}` : tag;
   }
-  const tag = match[0].slice(0, 2);
+  // 楔子/引子/终章 等
+  const tag = body.slice(0, 2);
   const title = (match[1] || '').trim();
   return title ? `${tag} ${title}` : tag;
 }
@@ -81,6 +85,8 @@ export function getChapterForChunk(chunkIndex, chunkSize, fullText, ranges = nul
   const rs = ranges || detectChapterRanges(fullText);
   if (rs.length === 0) return '';
   const chunkStart = chunkIndex * chunkSize;
+  // v26.4：chunkStart < 第一个章节 start 时（如第 0 片覆盖文件头），默认用第一章。
+  if (chunkStart < rs[0].start) return rs[0].chapter;
   let current = '';
   for (const r of rs) {
     if (r.start <= chunkStart) current = r.chapter;

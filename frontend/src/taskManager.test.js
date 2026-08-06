@@ -71,16 +71,16 @@ test('初始状态：空 snapshot', () => {
   assert.deepEqual(getTasksSnapshot(), []);
 });
 
-test('createAnalyzeTask 同项目拒绝并发（返回 null）', () => {
+test('createAnalyzeTask 同项目拒绝并发（返回 null）', async () => {
   const text = '第一章 山村\n' + '正文内容。'.repeat(50);
-  const t1 = createAnalyzeTask({
+  const t1 = await createAnalyzeTask({
     projectId: 'p1', projectName: 'A',
     modelId: 'm', modelName: 'M', systemPrompt: '',
     text, chunkSize: 100, concurrency: 1,
   });
   assert.ok(t1, '第一次创建应成功');
   // 同 projectId 第二次应被拒绝
-  const t2 = createAnalyzeTask({
+  const t2 = await createAnalyzeTask({
     projectId: 'p1', projectName: 'A',
     modelId: 'm', modelName: 'M', systemPrompt: '',
     text, chunkSize: 100, concurrency: 1,
@@ -88,14 +88,14 @@ test('createAnalyzeTask 同项目拒绝并发（返回 null）', () => {
   assert.equal(t2, null, '同项目并发应被拒绝');
 });
 
-test('不同 projectId 可并行', () => {
+test('不同 projectId 可并行', async () => {
   const text = '第一章\n' + 'x'.repeat(50);
-  const t1 = createAnalyzeTask({
+  const t1 = await createAnalyzeTask({
     projectId: 'p1', projectName: 'A',
     modelId: 'm', modelName: 'M', systemPrompt: '',
     text, chunkSize: 100, concurrency: 1,
   });
-  const t2 = createAnalyzeTask({
+  const t2 = await createAnalyzeTask({
     projectId: 'p2', projectName: 'B',
     modelId: 'm', modelName: 'M', systemPrompt: '',
     text, chunkSize: 100, concurrency: 1,
@@ -123,7 +123,7 @@ test('任务成功时等待本地断点删除完成后再 resolve', async () => 
     };
   };
 
-  const task = createAnalyzeTask({
+  const task = await createAnalyzeTask({
     projectId: 'p-delete-wait', projectName: 'A',
     modelId: 'm', modelName: 'M', systemPrompt: '',
     text: 'x', chunkSize: 100, concurrency: 1,
@@ -142,9 +142,9 @@ test('任务成功时等待本地断点删除完成后再 resolve', async () => 
   assert.equal(resolved, true);
 });
 
-test('cancelTask 修改变量引用：原 bug 是 ReferenceError', () => {
+test('cancelTask 修改变量引用：原 bug 是 ReferenceError', async () => {
   const text = '第一章\n' + 'x'.repeat(50);
-  const t = createAnalyzeTask({
+  const t = await createAnalyzeTask({
     projectId: 'p1', modelId: 'm', modelName: 'M', systemPrompt: '',
     text, chunkSize: 100, concurrency: 1,
   });
@@ -154,9 +154,9 @@ test('cancelTask 修改变量引用：原 bug 是 ReferenceError', () => {
   assert.equal(getTasksSnapshot()[0].status, 'cancelled');
 });
 
-test('removeTask 释放 Map + 排队的任务', () => {
+test('removeTask 释放 Map + 排队的任务', async () => {
   const text = '第一章\n' + 'x'.repeat(50);
-  const t = createAnalyzeTask({
+  const t = await createAnalyzeTask({
     projectId: 'p1', modelId: 'm', modelName: 'M', systemPrompt: '',
     text, chunkSize: 100, concurrency: 1,
   });
@@ -166,8 +166,8 @@ test('removeTask 释放 Map + 排队的任务', () => {
   assert.equal(getTasksSnapshot().length, 0);
 });
 
-test('pauseTask 仅在 active 状态生效', () => {
-  const t = createAnalyzeTask({
+test('pauseTask 仅在 active 状态生效', async () => {
+  const t = await createAnalyzeTask({
     projectId: 'p1', modelId: 'm', modelName: 'M', systemPrompt: '',
     text: 'x'.repeat(50), chunkSize: 100, concurrency: 1,
   });
@@ -180,7 +180,7 @@ test('pauseTask 仅在 active 状态生效', () => {
 
 test('resumeTask 从 paused 恢复', async () => {
   const text = '第一章\n' + 'x'.repeat(50);
-  const t = createAnalyzeTask({
+  const t = await createAnalyzeTask({
     projectId: 'p1', modelId: 'm', modelName: 'M', systemPrompt: '',
     text, chunkSize: 100, concurrency: 1,
   });
@@ -192,10 +192,10 @@ test('resumeTask 从 paused 恢复', async () => {
   if (before === 'paused') assert.notEqual(after, 'paused');
 });
 
-test('snapshot 暴露 overallTotal（retry 场景）', () => {
+test('snapshot 暴露 overallTotal（retry 场景）', async () => {
   // 不真正跑 retry（依赖 failureStore），仅验证 makeTaskRecord 字段
   const text = 'x'.repeat(50);
-  const t = createAnalyzeTask({
+  const t = await createAnalyzeTask({
     projectId: 'p1', modelId: 'm', modelName: 'M', systemPrompt: '',
     text, chunkSize: 100, concurrency: 1, chapterFrom: '', chapterTo: '',
   });
@@ -207,8 +207,8 @@ test('snapshot 暴露 overallTotal（retry 场景）', () => {
   assert.equal(snap.initialConcurrency, snap.currentConcurrency);
 });
 
-test('__TEST__.hasActiveTaskForProject 在 idle/running/paused 时返回 true', () => {
-  const t = createAnalyzeTask({
+test('__TEST__.hasActiveTaskForProject 在 idle/running/paused 时返回 true', async () => {
+  const t = await createAnalyzeTask({
     projectId: 'p1', modelId: 'm', modelName: 'M', systemPrompt: '',
     text: 'x'.repeat(50), chunkSize: 100, concurrency: 1,
   });
@@ -217,8 +217,8 @@ test('__TEST__.hasActiveTaskForProject 在 idle/running/paused 时返回 true', 
   assert.equal(__TEST__.hasActiveTaskForProject('p2'), false);
 });
 
-test('cancelTask 后 hasActiveTaskForProject 返回 false', () => {
-  const t = createAnalyzeTask({
+test('cancelTask 后 hasActiveTaskForProject 返回 false', async () => {
+  const t = await createAnalyzeTask({
     projectId: 'p1', modelId: 'm', modelName: 'M', systemPrompt: '',
     text: 'x'.repeat(50), chunkSize: 100, concurrency: 1,
   });
@@ -226,8 +226,8 @@ test('cancelTask 后 hasActiveTaskForProject 返回 false', () => {
   assert.equal(__TEST__.hasActiveTaskForProject('p1'), false);
 });
 
-test('getTasksSnapshot 不暴露内部字段（abortController/promise/chunks）', () => {
-  const t = createAnalyzeTask({
+test('getTasksSnapshot 不暴露内部字段（abortController/promise/chunks）', async () => {
+  const t = await createAnalyzeTask({
     projectId: 'p1', modelId: 'm', modelName: 'M', systemPrompt: '',
     text: 'x'.repeat(50), chunkSize: 100, concurrency: 1,
   });
@@ -238,10 +238,10 @@ test('getTasksSnapshot 不暴露内部字段（abortController/promise/chunks）
   assert.equal(snap.resolve, undefined);
 });
 
-test('subscribe 收到新增事件', () => {
+test('subscribe 收到新增事件', async () => {
   const events = [];
   const unsub = subscribeTasks((t) => events.push(t.id));
-  const t = createAnalyzeTask({
+  const t = await createAnalyzeTask({
     projectId: 'p1', modelId: 'm', modelName: 'M', systemPrompt: '',
     text: 'x'.repeat(50), chunkSize: 100, concurrency: 1,
   });
@@ -262,9 +262,9 @@ test('刷新后把有效断点恢复为 interrupted 任务', () => {
   })), [{ projectId: 'p1', status: 'interrupted', completed: 4, total: 10, progress: 40, recoverable: true }]);
 });
 
-test('interrupted 恢复项不阻止同项目创建续跑任务', () => {
+test('interrupted 恢复项不阻止同项目创建续跑任务', async () => {
   restoreInterruptedTasks([{ projectId: 'p1', active: true, timestamp: 100, totalChunks: 2, lastCompleted: 1 }]);
-  const task = createContinueTask({
+  const task = await createContinueTask({
     projectId: 'p1', projectName: 'A', modelId: 'm', modelName: 'M', systemPrompt: '',
     progress: { active: true, totalChunks: 2, lastCompleted: 1, text: 'x'.repeat(200), chunkSize: 100, concurrency: 1 },
   });
@@ -272,17 +272,17 @@ test('interrupted 恢复项不阻止同项目创建续跑任务', () => {
   assert.equal(getTasksSnapshot().some((item) => item.status === 'interrupted'), false);
 });
 
-test('续跑构造失败时保留 interrupted 恢复项', () => {
+test('续跑构造失败时保留 interrupted 恢复项', async () => {
   restoreInterruptedTasks([{ projectId: 'p1', active: true, timestamp: 100, totalChunks: 2, lastCompleted: 1 }]);
-  const task = createContinueTask({ projectId: 'p1', progress: null });
+  const task = await createContinueTask({ projectId: 'p1', progress: null });
   assert.equal(task, null);
   assert.equal(getTasksSnapshot()[0].status, 'interrupted');
 });
 
-test('createAnalyzeTask 成功后替换同项目 interrupted 恢复项', () => {
+test('createAnalyzeTask 成功后替换同项目 interrupted 恢复项', async () => {
   restoreInterruptedTasks([{ projectId: 'p1', active: true, timestamp: 100, totalChunks: 10, lastCompleted: 4 }]);
   assert.equal(getTasksSnapshot().length, 1);
-  const task = createAnalyzeTask({
+  const task = await createAnalyzeTask({
     projectId: 'p1', projectName: 'A', modelId: 'm', modelName: 'M', systemPrompt: '',
     text: '第一章\n' + 'x'.repeat(200), chunkSize: 100, concurrency: 1,
   });

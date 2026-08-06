@@ -13,6 +13,7 @@ import { loadConfig, saveConfig } from './config.js';
 import TaskPanel, { useTaskCounts } from './TaskPanel.jsx';
 import CharacterInspector from './CharacterInspector.jsx';
 import RelationshipTimeline from './RelationshipTimeline.jsx';
+import { decodeFileText, isSmallPasteText } from './encodingDetect.js';
 import {
   buildCharacterProfile, buildRelationshipTracks, getChapters,
   filterByViewMode, filterByChapter, filterByChapterRange,
@@ -135,7 +136,6 @@ export default function App() {
   const s = useStore();
 
   // ==================== 本地状态 ====================
-  const [text, setText] = useState('');
   const [newProjectName, setNewProjectName] = useState('');
   const [showLLMManager, setShowLLMManager] = useState(false);
   const [showConfig, setShowConfig] = useState(false);
@@ -194,14 +194,16 @@ export default function App() {
   }, [s.theme]);
 
   // 章节范围检测（文本章节，仅供 refine 切片用）
+  // v26.1：仅粘贴路径前端持有全文；上传路径前端无原文，跳过检测（后端分析时自取）。
   useEffect(() => {
-    if (text) {
-      const ranges = detectChapterRanges(text);
+    const pasted = (s.pastedText || '');
+    if (pasted.trim()) {
+      const ranges = detectChapterRanges(pasted);
       s.setTextChapterRanges(ranges);
     } else {
       s.setTextChapterRanges([]);
     }
-  }, [text]);
+  }, [s.pastedText]);
 
   // v2.4：点击外部关闭阈值 popover
   useEffect(() => {
@@ -362,9 +364,9 @@ export default function App() {
   // 引导
   const guideState = useMemo(() => buildTaskGuide({
     hasProject: !!s.currentProjectId,
-    hasText: text.trim().length > 0,
+    hasText: ((s.pastedText || '').trim().length > 0) || !!s.textMeta,
     hasModel: !!s.currentLlmId,
-  }), [s.currentProjectId, text, s.currentLlmId]);
+  }), [s.currentProjectId, s.pastedText, s.textMeta, s.currentLlmId]);
 
   // 项目过滤
   const filteredProjects = useMemo(() => {
@@ -413,7 +415,7 @@ export default function App() {
     else if (target === 'text') { setActiveRail('project'); setSidebarOpen(true); }
     else if (target === 'model') { setShowLLMManager(true); }
     else if (target === 'analyze') { handleAnalyze(); }
-  }, [text, s.currentLlmId, s.currentProjectId]);
+  }, [s.pastedText, s.textMeta, s.currentLlmId, s.currentProjectId]);
 
   const handleCreateProject = useCallback(async () => {
     if (!newProjectName.trim()) return;
@@ -421,25 +423,66 @@ export default function App() {
     setNewProjectName('');
   }, [newProjectName]);
 
-  const handleTextFile = useCallback((e) => {
+  const handleTextFile = useCallback(async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    if (!s.currentProjectId) {
+      showToast('请先选择项目');
+      e.target.value = '';
+      return;
+    }
+    const projectId = s.currentProjectId;
     const reader = new FileReader();
-    reader.onload = (ev) => {
-      const content = ev.target.result;
-      setText(content);
-      showToast(`已导入 ${file.name}（${content.length} 字）`);
+    reader.onload = async (ev) => {
+      try {
+        const { text, encoding } = decodeFileText(ev.target.result);
+        if (isSmallPasteText(text)) {
+          // v26.1：粘贴/小文本走老路径（≤100KB），进 pastedText（textarea 受控）
+          s.setPastedText(text);
+          s.setTextMeta({
+            chars: text.length,
+            encoding,
+            fileName: file.name,
+            hash: '',
+            updatedAt: Date.now(),
+            source: 'paste',
+          });
+          showToast(`已导入 ${file.name}（${text.length} 字 / ${encoding}）`);
+          return;
+        }
+        // v26.1：大文本走 PUT 上传；前端只持 meta，不进 textarea
+        const r = await s.uploadProjectText(projectId, text, encoding);
+        s.setTextMeta({
+          chars: r.chars,
+          encoding: r.encoding,
+          fileName: file.name,
+          hash: '',
+          updatedAt: r.updatedAt,
+          source: 'upload',
+        });
+        s.setPastedText('');
+        showToast(`已上传 ${file.name}（${r.chars} 字 / ${r.encoding}）`);
+      } catch (err) {
+        console.error('导入文本失败', err);
+        showToast(`导入失败：${err.message || err}`);
+      }
     };
-    reader.readAsText(file);
+    reader.readAsArrayBuffer(file);
     e.target.value = '';
-  }, [showToast]);
+  }, [s, showToast]);
 
   const handleAnalyze = useCallback(() => {
-    if (!text.trim()) { showToast('请先导入或输入文本'); return; }
+    // v26.1：粘贴路径用 pastedText；导入大文本走 project_id（text=null）
+    const hasPasted = (s.pastedText || '').trim();
+    const hasMeta = !!s.textMeta;
+    if (!hasPasted && !hasMeta) {
+      showToast('请先导入或输入文本');
+      return;
+    }
     if (!s.currentLlmId) { showToast('请先选择 LLM 模型'); return; }
     if (!s.currentProjectId) { showToast('请先选择项目'); return; }
-    s.analyzeText(text, concurrency, chunkSize);
-  }, [text, s.currentLlmId, s.currentProjectId, concurrency, chunkSize]);
+    s.analyzeText(hasPasted ? s.pastedText : null, concurrency, chunkSize);
+  }, [s, s.pastedText, s.textMeta, s.currentLlmId, s.currentProjectId, concurrency, chunkSize]);
 
   const handleExportProject = useCallback(() => {
     s.exportProject();
@@ -588,7 +631,7 @@ export default function App() {
         <button
           className="nl-pill primary"
           onClick={handleAnalyze}
-          disabled={s.isAnalyzing || !text.trim() || !s.currentProjectId || !s.currentLlmId}
+          disabled={s.isAnalyzing || (!(s.pastedText || '').trim() && !s.textMeta) || !s.currentProjectId || !s.currentLlmId}
           title="运行分析"
         >
           {s.isAnalyzing ? `运行中 ${s.progress}%` : '运行分析'}
@@ -872,20 +915,24 @@ export default function App() {
             )}
           </div>
 
-          {/* 文本粘贴区（保留：用户可直接粘贴文本炼化） */}
-          {text && (
-            <div className="nl-ref-text-stats">
-              已导入 {text.length} 字
+          {/* v26.1：导入大文本只显示 meta 摘要；textarea 仅在粘贴小文本时显示 */}
+          {s.textMeta && (
+            <div className="nl-ref-text-stats" title={s.textMeta.fileName || ''}>
+              已导入 {s.textMeta.chars.toLocaleString()} 字（{s.textMeta.encoding}）
+              {s.textMeta.source === 'upload' && <span className="nl-ref-text-stats-tag"> 后端存储</span>}
+              {s.textMeta.source === 'paste' && <span className="nl-ref-text-stats-tag"> 粘贴</span>}
               {chapterOptions.length > 0 && ` · ${chapterOptions.length} 章`}
             </div>
           )}
-          <textarea
-            placeholder="或直接粘贴文本…"
-            value={text}
-            onChange={e => setText(e.target.value)}
-            className="nl-ref-textarea"
-            disabled={!s.currentProjectId}
-          />
+          {(!s.textMeta || s.textMeta.source === 'paste') && (
+            <textarea
+              placeholder={s.textMeta ? '粘贴文本将覆盖当前内容' : '或直接粘贴文本…'}
+              value={s.pastedText}
+              onChange={e => s.setPastedText(e.target.value)}
+              className="nl-ref-textarea"
+              disabled={!s.currentProjectId}
+            />
+          )}
 
           <div className="nl-ref-actions">
             {/* v2.5：label 包 file input 兼容所有浏览器（Edge/旧 Safari 下
@@ -915,7 +962,7 @@ export default function App() {
             <button
               className="nl-btn accent"
               onClick={handleAnalyze}
-              disabled={s.isAnalyzing || !text.trim() || !s.currentProjectId || !s.currentLlmId}
+              disabled={s.isAnalyzing || (!(s.pastedText || '').trim() && !s.textMeta) || !s.currentProjectId || !s.currentLlmId}
               title="运行分析"
             >
               {s.isAnalyzing ? `分析中… ${s.progress}%` : '运行分析'}
@@ -950,7 +997,7 @@ export default function App() {
             </div>
           )}
 
-          {!s.currentProjectId && !text.trim() && (
+          {!s.currentProjectId && !(s.pastedText || '').trim() && !s.textMeta && (
             <div className="nl-guide">
               {guideState.steps.map(step => (
                 <div key={step.id} className={`nl-guide-step ${step.state}`}>

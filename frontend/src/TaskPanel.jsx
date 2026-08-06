@@ -66,6 +66,13 @@ function TaskRow({ task, projectName, isCurrentProject, onPause, onResume, onCan
           <span className="task-kind">{KIND_LABELS[task.kind] || task.kind}</span>
           {task.modelName && <span className="task-model">· {task.modelName}</span>}
         </div>
+        {(task.chunkSize || task.concurrency || task.initialConcurrency) && (
+          <div className="task-params">
+            {task.chunkSize ? <span className="task-param-tag">{task.chunkSize} 字/片</span> : null}
+            {(task.chunkSize && (task.concurrency || task.initialConcurrency)) ? <span className="task-param-sep">·</span> : null}
+            {(task.concurrency || task.initialConcurrency) ? <span className="task-param-tag">{task.concurrency || task.initialConcurrency} 并发</span> : null}
+          </div>
+        )}
       </div>
 
       <div className="task-progress-row">

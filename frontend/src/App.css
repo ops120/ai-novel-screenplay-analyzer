@@ -363,6 +363,23 @@
   margin-top: 10px;
   margin-bottom: 6px;
 }
+.nl-ref-text-stats {
+  font-size: 11px; color: var(--ink-faint);
+  margin-top: 10px;
+  margin-bottom: 6px;
+  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+}
+.nl-ref-text-stats-tag {
+  display: inline-flex; align-items: center;
+  padding: 1px 6px;
+  margin-left: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 10px; font-weight: 500;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
 .nl-ref-textarea {
   width: 100%;
   min-height: 80px;
@@ -1478,6 +1495,25 @@
 .task-row-meta {
   display: flex; align-items: center; gap: 4px;
   font-size: 11px; color: var(--ink-faint);
+}
+.task-params {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--ink-soft, #6b675f);
+  letter-spacing: 0.02em;
+}
+.task-param-tag {
+  padding: 1px 7px;
+  border-radius: 8px;
+  background: var(--surface-2, #efeae0);
+  border: 1px solid var(--line, #d8d2c4);
+  font-variant-numeric: tabular-nums;
+}
+.task-param-sep {
+  color: var(--ink-faint, #8c8779);
 }
 .task-kind { color: var(--ink-soft); }
 .task-model { color: var(--ink-faint); }

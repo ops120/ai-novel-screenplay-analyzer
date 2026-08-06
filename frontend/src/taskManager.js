@@ -47,6 +47,9 @@ const NON_LOCKING_STATUSES = new Set([...TERMINAL_STATUSES, 'interrupted']);
 // 等待启动的任务队列（FIFO）。setInterval 已被 pumpQueue 取代。
 const pendingQueue = [];
 
+// v26.3：异步创建占位 —— 防止 await 期间二次点击绕过 hasActiveTaskForProject 检查
+const pendingProjectIds = new Set();
+
 // ---------------- task 状态 ----------------
 
 let _seq = 0;
@@ -73,6 +76,7 @@ function makeTaskRecord(opts) {
     degraded: false,
     initialConcurrency: initial,            // v17：起始并发度（不随降级变化）
     currentConcurrency: initial,            // v18：当前并发度（降级后会变）
+    concurrency: opts.concurrency,           // 任务卡片展示用原始并发度（不变）
     chapterFrom: opts.chapterFrom || '',
     chapterTo: opts.chapterTo || '',
     createdAt: Date.now(),
@@ -126,6 +130,7 @@ function activeTaskCount() {
 // v25：interrupted 恢复项不参与项目锁（见 NON_LOCKING_STATUSES 注释）。
 function hasActiveTaskForProject(projectId) {
   if (!projectId) return false;
+  if (pendingProjectIds.has(projectId)) return true;
   for (const t of tasks.values()) {
     if (t.projectId === projectId && !NON_LOCKING_STATUSES.has(t.status)) return true;
   }
@@ -167,7 +172,32 @@ function scheduleTask(task) {
 
 // ---------------- 切片构造 ----------------
 
+// v26.2：从后端 chunk-metas 拿元数据（前端不再持有原文）。
+// 返回 { total, chunkSize, chunkMetas: [{chunkIndex, chapter}] }
+async function fetchChunkMetas(projectId, chunkSize, chapterFrom, chapterTo) {
+  if (!projectId) throw new Error('fetchChunkMetas: projectId 必填');
+  const params = new URLSearchParams();
+  params.set('chunk_size', String(chunkSize || 500));
+  if (chapterFrom) params.set('chapter_from', String(chapterFrom));
+  if (chapterTo) params.set('chapter_to', String(chapterTo));
+  const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/chunk-metas?${params.toString()}`);
+  if (!res.ok) {
+    let detail = '';
+    try { detail = JSON.stringify(await res.json()); } catch { /* ignore */ }
+    throw new Error(`HTTP ${res.status} ${detail}`);
+  }
+  const body = await res.json();
+  if (body.status !== 'success') throw new Error('chunk-metas 返回 status=' + body.status);
+  return {
+    total: body.total,
+    chunkSize: body.chunkSize,
+    chunkMetas: Array.isArray(body.chunkMetas) ? body.chunkMetas : [],
+  };
+}
+
 function buildChunks(text, chunkSize, chapterFrom, chapterTo) {
+  // v26.2：text 为空或 null 时不再生成 chunk（前端无原文，调用方走 fetchChunkMetas 拿元数据）。
+  if (text == null || text === '') return [];
   let chunkMetas = splitTextWithChapterContext(text, chunkSize);
   const from = Number(chapterFrom);
   const to = Number(chapterTo);
@@ -194,7 +224,8 @@ function buildChunks(text, chunkSize, chapterFrom, chapterTo) {
 
 async function executeTask(task) {
   const { projectId, modelId, systemPrompt, chunkSize, concurrency } = task;
-  const total = task.chunks.length;
+  // v26.2：task.chunks 可能是 null 占位数组（小文本模式才有真实文本），以 task.total 为准。
+  const total = task.total || task.chunks.length;
 
   if (total === 0) {
     updateTask(task, { status: 'completed', finishedAt: Date.now(), progress: 100 });
@@ -213,6 +244,7 @@ async function executeTask(task) {
   // 否则刷新又会出现「任务管理里什么都没跑过」的诡异空白。
   if (task.kind !== 'retry') {
     try {
+      // v26.2：大文本模式 progress.text 留空（后端 task-progress 兼容空 text）。
       await saveProgress(projectId, {
         totalChunks: task.startIndex + total,
         lastCompleted: task.startIndex,
@@ -237,20 +269,24 @@ async function executeTask(task) {
     }
   }
 
+  // v26.2：大文本模式（task.text == null）时，runOne 不传 text（后端按 chunk_index × chunk_size 切片）。
+  // 小文本模式保留老路径（text = 切片前缀后的子串）。
+  const isLargeText = !task.text;
   const runOne = async (chunk, index) => {
     const meta = task.chunkMetas[task.startIndex + index];
+    const body = {
+      model_id: modelId,
+      system_prompt: systemPrompt,
+      chunk_index: meta?.chunkIndex ?? index,
+      chunk_size: chunkSize,
+      chunk_chapter: meta?.chapter || '',
+    };
+    if (!isLargeText) body.text = chunk;
     try {
       const res = await fetch(`${API_BASE}/projects/${projectId}/analyze`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model_id: modelId,
-          text: chunk,
-          system_prompt: systemPrompt,
-          chunk_index: meta?.chunkIndex ?? index,
-          chunk_size: chunkSize,
-          chunk_chapter: meta?.chapter || '',
-        }),
+        body: JSON.stringify(body),
         signal: task.abortController.signal,
       });
       const r = await res.json().catch(() => ({}));
@@ -344,9 +380,10 @@ async function executeTask(task) {
     }
 
     // 失败切片落 failureStore（v18 兼容：只有 analyze / retry 写）
+    // v26.2：大文本模式不存 text（前端无原文；retry 时走 chunk-metas）。
     if (task.kind !== 'continue' && failed.length > 0) {
       saveFailure(projectId, {
-        totalChunks: task.overallTotal,  // v24.0.1：保持原文全局切片总数，与 failed[].chunkIndex 同一坐标系
+        totalChunks: task.overallTotal,
         chunks: failed,
         text: task.text || '',
         chunkSize,
@@ -396,7 +433,8 @@ async function executeTask(task) {
  * 创建并启动一次「全新」炼化任务（按文本切片，从头开始）。
  * 同 projectId 已有 active 任务时返回 null（拒绝并发）。
  */
-export function createAnalyzeTask(opts) {
+// v26.2：异步。text=null 时按 project_id 走后端 chunk-metas；text 非空走老路径。
+export async function createAnalyzeTask(opts) {
   if (!opts || !opts.projectId) return null;
   if (hasActiveTaskForProject(opts.projectId)) return null;
 
@@ -411,46 +449,95 @@ export function createAnalyzeTask(opts) {
     chapterFrom: opts.chapterFrom,
     chapterTo: opts.chapterTo,
   });
-  task.text = opts.text;
+  task.text = opts.text || null;  // v26.2：null 表示大文本模式（后端切片）
   task.modelId = opts.modelId;
   task.systemPrompt = opts.systemPrompt;
   task.chunkSize = opts.chunkSize;
 
-  const chunkMetas = buildChunks(opts.text, opts.chunkSize, opts.chapterFrom, opts.chapterTo);
-  task.chunkMetas = chunkMetas;
-  task.chunks = chunkMetas.map((c) => c.text);
-  task.total = chunkMetas.length;
-  task.overallTotal = chunkMetas.length;
-  task.startIndex = 0;
-
-  task.promise = new Promise((resolve, reject) => {
-    task.resolve = resolve;
-    task.reject = reject;
-  });
-
-  // v25：与 createContinueTask 同语义 —— 全部构造成功后才替换掉恢复项。
-  removeInterruptedForProject(opts.projectId);
-
+  // v26.3：立即占位 tasks Map，防止连点 / await 期间二次调用绕过 hasActiveTaskForProject 检查
   tasks.set(id, task);
-  notifyTask(task);
-  scheduleTask(task);
-  return task;
+
+  try {
+    if (task.text) {
+      // 粘贴/小文本路径：前端切片，task.chunks 持有带章节前缀的文本。
+      const chunkMetas = buildChunks(opts.text, opts.chunkSize, opts.chapterFrom, opts.chapterTo);
+      task.chunkMetas = chunkMetas;
+      task.chunks = chunkMetas.map((c) => c.text);
+      task.total = chunkMetas.length;
+      task.overallTotal = chunkMetas.length;
+    } else {
+      // 大文本路径：后端 chunk-metas，task.chunks 用 null 占位（runAnalyzesInParallel 仍按 length 调度）。
+      const meta = await fetchChunkMetas(opts.projectId, opts.chunkSize, opts.chapterFrom, opts.chapterTo);
+      task.chunkMetas = meta.chunkMetas;
+      task.chunks = new Array(meta.chunkMetas.length).fill(null);
+      task.total = meta.chunkMetas.length;
+      task.overallTotal = meta.total;
+    }
+    task.startIndex = 0;
+
+    if (task.total === 0) {
+      // 没切出任何片：直接标完成，避免跑空
+      task.status = 'completed';
+      task.finishedAt = Date.now();
+      task.promise = Promise.resolve({ successCount: 0, failedCount: 0 });
+      return task;
+    }
+
+    task.promise = new Promise((resolve, reject) => {
+      task.resolve = resolve;
+      task.reject = reject;
+    });
+
+    // v25：与 createContinueTask 同语义 —— 全部构造成功后才替换掉恢复项。
+    removeInterruptedForProject(opts.projectId);
+
+    notifyTask(task);
+    scheduleTask(task);
+    return task;
+  } catch (err) {
+    tasks.delete(id);  // 取 chunk-metas 失败，回滚占位
+    console.warn('createAnalyzeTask 取 chunk-metas 失败', err);
+    return null;
+  }
 }
 
 /**
  * 创建并启动「续跑」任务。从 progressStore 读上次进度。
  * @returns {object|null} task；若无可续跑进度返回 null
  */
-export function createContinueTask(opts) {
+// v26.2：异步。progress.text 为空时按 project_id 走后端 chunk-metas；
+// startIndex = progress.lastCompleted。
+export async function createContinueTask(opts) {
   if (!opts || !opts.projectId) return null;
   if (hasActiveTaskForProject(opts.projectId)) return null;
 
   const { progress } = opts;
   if (!progress || !progress.active || progress.lastCompleted >= progress.totalChunks) return null;
-  const text = progress.text;
-  if (!text) return null;
-  const chunkMetas = buildChunks(text, progress.chunkSize, progress.chapterFrom, progress.chapterTo);
+  const text = progress.text || '';
   const start = progress.lastCompleted;
+  const chunkSize = progress.chunkSize;
+  const chapterFrom = progress.chapterFrom;
+  const chapterTo = progress.chapterTo;
+
+  let chunkMetas = [];
+  let overallTotal = 0;
+  pendingProjectIds.add(opts.projectId);
+  try {
+    if (text) {
+      chunkMetas = buildChunks(text, chunkSize, chapterFrom, chapterTo);
+      overallTotal = chunkMetas.length;
+    } else {
+      // v26.2：大文本模式续跑 —— 从后端拿 chunk-metas，再按 startIndex 切片。
+      const meta = await fetchChunkMetas(opts.projectId, chunkSize, chapterFrom, chapterTo);
+      chunkMetas = meta.chunkMetas;
+      overallTotal = meta.total;
+    }
+  } catch (err) {
+    console.warn('createContinueTask 取 chunk-metas 失败', err);
+    return null;
+  } finally {
+    pendingProjectIds.delete(opts.projectId);
+  }
   const remainingMetas = chunkMetas.slice(start);
   if (remainingMetas.length === 0) return null;
 
@@ -462,17 +549,17 @@ export function createContinueTask(opts) {
     projectName: opts.projectName || '',
     modelName: opts.modelName,
     concurrency: progress.concurrency,
-    chapterFrom: progress.chapterFrom,
-    chapterTo: progress.chapterTo,
+    chapterFrom: chapterFrom,
+    chapterTo: chapterTo,
     total: remainingMetas.length,
-    overallTotal: chunkMetas.length,  // v24.0.1：原文全局切片总数
+    overallTotal: overallTotal,
   });
-  task.text = text;
+  task.text = text || null;
   task.modelId = opts.modelId;
   task.systemPrompt = opts.systemPrompt;
-  task.chunkSize = progress.chunkSize;
+  task.chunkSize = chunkSize;
   task.chunkMetas = chunkMetas;
-  task.chunks = remainingMetas.map((c) => c.text);
+  task.chunks = text ? remainingMetas.map((c) => c.text) : new Array(remainingMetas.length).fill(null);
   task.startIndex = start;
 
   task.promise = new Promise((resolve, reject) => {
@@ -480,7 +567,6 @@ export function createContinueTask(opts) {
     task.reject = reject;
   });
 
-  // v25：所有校验与任务记录构造都已成功，此刻才替换掉恢复项。
   removeInterruptedForProject(opts.projectId);
 
   tasks.set(id, task);
@@ -493,15 +579,35 @@ export function createContinueTask(opts) {
  * 创建并启动「重试失败切片」任务。从 failureStore 读失败记录。
  * @returns {object|null} task
  */
-export function createRetryFailedTask(opts) {
+// v26.2：异步。failure.text 为空时按 project_id 走后端 chunk-metas，
+// 仅重试 failure.chunks 里的 chunkIndex 子集。
+export async function createRetryFailedTask(opts) {
   if (!opts || !opts.projectId) return null;
   if (hasActiveTaskForProject(opts.projectId)) return null;
 
   const failure = getFailure(opts.projectId);
   if (!failure || failure.chunks.length === 0) return null;
-  const text = failure.text;
-  if (!text) return null;
-  const chunkMetas = buildChunks(text, failure.chunkSize, failure.chapterFrom, failure.chapterTo);
+  const text = failure.text || '';
+  const chunkSize = failure.chunkSize;
+
+  let chunkMetas = [];
+  let overallTotal = failure.totalChunks || 0;
+  pendingProjectIds.add(opts.projectId);
+  try {
+    if (text) {
+      chunkMetas = buildChunks(text, chunkSize, failure.chapterFrom, failure.chapterTo);
+      if (!overallTotal) overallTotal = chunkMetas.length;
+    } else {
+      const meta = await fetchChunkMetas(opts.projectId, chunkSize, failure.chapterFrom, failure.chapterTo);
+      chunkMetas = meta.chunkMetas;
+      if (!overallTotal) overallTotal = meta.total;
+    }
+  } catch (err) {
+    console.warn('createRetryFailedTask 取 chunk-metas 失败', err);
+    return null;
+  } finally {
+    pendingProjectIds.delete(opts.projectId);
+  }
   const targets = failure.chunks
     .map((c) => ({ failure: c, meta: chunkMetas.find((m) => m.chunkIndex === c.chunkIndex) }))
     .filter((t) => t.meta);
@@ -514,19 +620,17 @@ export function createRetryFailedTask(opts) {
     projectId: opts.projectId,
     projectName: opts.projectName || '',
     modelName: opts.modelName,
-    concurrency: 1,  // v18：重试串行，避免再次打挂限流
+    concurrency: 1,
     chapterFrom: failure.chapterFrom,
     chapterTo: failure.chapterTo,
     total: targets.length,
-    overallTotal: failure.totalChunks || chunkMetas.length,  // v24.0.1：保持原文全局切片总数
+    overallTotal,
   });
-  task.text = text;
+  task.text = text || null;
   task.modelId = opts.modelId;
   task.systemPrompt = opts.systemPrompt;
-  task.chunkSize = failure.chunkSize;
-  task.chunks = targets.map((t) => t.meta.text);
-  // v24.0.1：chunkMetas 局部化为目标子集，与 chunks 同序。executeTask runOne 用
-  // task.chunkMetas[task.startIndex + i] 取 meta，chunkIndex 与 failure 全局一致。
+  task.chunkSize = chunkSize;
+  task.chunks = text ? targets.map((t) => t.meta.text) : new Array(targets.length).fill(null);
   task.chunkMetas = targets.map((t) => t.meta);
   task.startIndex = 0;
 
