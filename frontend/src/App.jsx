@@ -388,10 +388,16 @@ export default function App() {
   }), [s.currentProjectId, s.pastedText, s.textMeta, s.currentLlmId]);
 
   // 项目过滤
+  // v27: search matches name + id; default sort by lastUpdateAt desc
+  //      主力项目（最近打开过的）自然沉到顶部
   const filteredProjects = useMemo(() => {
-    if (!projectSearch.trim()) return s.projects;
-    const term = projectSearch.toLowerCase();
-    return s.projects.filter(p => p.name.toLowerCase().includes(term));
+    const term = projectSearch.trim().toLowerCase();
+    const matched = term
+      ? s.projects.filter(p =>
+          (p.name || '').toLowerCase().includes(term) ||
+          (p.id || '').toLowerCase().includes(term))
+      : s.projects;
+    return [...matched].sort((a, b) => (b.lastUpdateAt || 0) - (a.lastUpdateAt || 0));
   }, [s.projects, projectSearch]);
 
   const filteredChapterOptions = useMemo(() => {
@@ -554,14 +560,29 @@ export default function App() {
     s.setGraphRange({ from: 0, to: 0 });
   }, []);
 
+  // v27: 相对时间 (e.g. "3 分钟前", "2 小时前", "5 天前")
+  const formatRelativeTime = useCallback((ts) => {
+    if (!ts) return '';
+    const now = Date.now();
+    const diff = Math.max(0, now - ts);
+    const sec = Math.floor(diff / 1000);
+    if (sec < 60) return '刚刚';
+    const min = Math.floor(sec / 60);
+    if (min < 60) return `${min} 分钟前`;
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return `${hr} 小时前`;
+    const day = Math.floor(hr / 24);
+    if (day < 30) return `${day} 天前`;
+    const mo = Math.floor(day / 30);
+    if (mo < 12) return `${mo} 个月前`;
+    return `${Math.floor(mo / 12)} 年前`;
+  }, []);
   // 标记搜索高亮渲染
-  const renderHighlightedName = useCallback((name) => {
-    if (!projectSearch) return name;
+  const renderHighlighted = useCallback((text) => {
+    if (!projectSearch || !text) return text;
     const safe = projectSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return name.replace(
-      new RegExp(`(${safe})`, 'gi'),
-      '<mark>$1</mark>'
-    );
+    const esc = String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return esc.replace(new RegExp(`(${safe})`, 'gi'), '<mark>$1</mark>');
   }, [projectSearch]);
 
   // ==================== 渲染 ====================
@@ -752,13 +773,17 @@ export default function App() {
         <section className="nl-sb-section">
           <header className="nl-sb-h">
             <h3>项目库</h3>
-            <span className="nl-sb-meta">共 {s.projects.length}</span>
+            <span className="nl-sb-meta">
+              {projectSearch
+                ? <>筛选 {filteredProjects.length} / 共 {s.projects.length}</>
+                : <>共 {s.projects.length}</>}
+            </span>
           </header>
 
           <div className="nl-search">
             {Icons.search}
             <input
-              placeholder="搜索项目名…"
+              placeholder="搜索项目名或 id…"
               value={projectSearch}
               onChange={e => setProjectSearch(e.target.value)}
             />
@@ -809,13 +834,16 @@ export default function App() {
                     <div className="nl-proj-row1">
                       <div
                         className="nl-proj-name"
-                        dangerouslySetInnerHTML={{ __html: renderHighlightedName(p.name) }}
+                        dangerouslySetInnerHTML={{ __html: renderHighlighted(p.name) }}
                       />
-                      <span className="nl-proj-id">#{p.id}</span>
+                      <span className="nl-proj-id" dangerouslySetInnerHTML={{ __html: "#" + renderHighlighted(p.id) }} />
                     </div>
                     <div className="nl-proj-row2">
                       <span className="nl-proj-dot" />
                       <span>{p.nodeCount ?? 0} 人物 · {p.edgeCount ?? 0} 关系</span>
+                      {p.lastUpdateAt && (
+                        <span className="nl-proj-time" title={new Date(p.lastUpdateAt).toLocaleString()}>{formatRelativeTime(p.lastUpdateAt)}</span>
+                      )}
                       <button
                         className="nl-proj-action"
                         onClick={(e) => { e.stopPropagation(); setEditingProjectId(p.id); setEditingName(p.name); }}

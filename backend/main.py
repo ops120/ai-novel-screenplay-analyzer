@@ -861,7 +861,12 @@ def list_projs():
                           SELECT 1 FROM nodes nt
                           WHERE nt.project_id = e.project_id AND nt.id = e.target
                       )
-                ) AS edgeCount
+                ) AS edgeCount,
+                COALESCE(
+                    (SELECT MAX(updated_at) FROM project_text WHERE project_id = p.id),
+                    (SELECT MAX(strftime('%s', created_at) * 1000) FROM edges WHERE project_id = p.id),
+                    0
+                ) AS lastUpdateAt
             FROM projects p
         """).fetchall()
         return [dict(r) for r in rows]
