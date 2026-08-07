@@ -209,7 +209,7 @@ npm run build:portable            # 构建 Windows 便携版
 
 ## 作者
 
-你们喜爱的老王 — B 站 https://space.bilibili.com/97727630
+你们喜爱的老王 — [B 站 @你们喜爱的老王](https://space.bilibili.com/97727630)
 
 ---
 
