@@ -203,6 +203,14 @@ npm run build:portable            # 构建 Windows 便携版
 
 本项目采用 [MIT License](LICENSE)。
 
+## 社区
+
+本项目在 LINUX DO 社区进行开源推广，感谢社区佬友的交流、反馈与建议。
+
+## 作者
+
+你们喜爱的老王 — B 站 https://space.bilibili.com/97727630
+
 ---
 
 小说剧本智能分析工作台：让每一次立项，都有原文依据。
