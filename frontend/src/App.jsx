@@ -149,7 +149,7 @@ export default function App() {
   const [debug, setDebug] = useState(false);
   const [chunkSize, setChunkSize] = useState(500);
   const [systemPrompt, setSystemPrompt] = useState('');
-  const [concurrency, setConcurrency] = useState(3);
+  const [concurrency, setConcurrency] = useState(2);
   const [chapterSearchTerm, setChapterSearchTerm] = useState('');
   const [showChapterPicker, setShowChapterPicker] = useState(false);
   const [showTimelineDrawer, setShowTimelineDrawer] = useState(false);
@@ -1039,7 +1039,7 @@ export default function App() {
           {s.lastFailure && !s.isAnalyzing && (
             <div className="nl-ref-failure">
               上次失败 {s.lastFailure.chunks.length} 片
-              <button className="nl-pill" onClick={s.retryFailedChunks}>重试</button>
+              <button className="nl-pill" onClick={() => s.retryFailedChunks(concurrency)}>重试</button>
               <button className="nl-pill" onClick={s.clearLastFailure}>忽略</button>
             </div>
           )}

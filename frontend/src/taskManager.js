@@ -620,7 +620,7 @@ export async function createRetryFailedTask(opts) {
     projectId: opts.projectId,
     projectName: opts.projectName || '',
     modelName: opts.modelName,
-    concurrency: 1,
+    concurrency: clampConcurrency(opts.concurrency ?? 1),
     chapterFrom: failure.chapterFrom,
     chapterTo: failure.chapterTo,
     total: targets.length,
