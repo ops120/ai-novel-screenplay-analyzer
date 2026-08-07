@@ -1,22 +1,25 @@
 @echo off
 echo ========================================
-echo   å¯åŠ¨å°è¯´å‰§æœ¬æ™ºèƒ½åˆ†æžå·¥ä½œå°åŽç«¯æœåŠ¡
-echo   Conda çŽ¯å¢ƒ: vevo
+echo   Æô¶¯Ð¡Ëµ¾ç±¾ÖÇÄÜ·ÖÎö¹¤×÷Ì¨ºó¶Ë·þÎñ
+echo   Python 3.10+
 echo ========================================
 echo.
 
 set "STORYMAP_DB=%~dp0storymap.db"
-echo SQLite æ•°æ®åº“: %STORYMAP_DB%
+echo SQLite Êý¾Ý¿â: %STORYMAP_DB%
 
-echo æ­£åœ¨æ¿€æ´» conda çŽ¯å¢ƒ vevo...
-call conda activate vevo
+rem --- ¿ÉÑ¡£º¼¤»î conda »·¾³ vevo£¨²»´æÔÚÔòÖ±½ÓÊ¹ÓÃÏµÍ³ python£© ---
+where conda >nul 2>nul
+if not errorlevel 1 (
+    call conda activate vevo >nul 2>nul
+)
 
 echo.
-echo æ­£åœ¨å¯åŠ¨åŽç«¯æœåŠ¡...
-echo æœåŠ¡åœ°å€: http://127.0.0.1:28000
-echo API æ–‡æ¡£: http://127.0.0.1:28000/docs
+echo ÕýÔÚÆô¶¯ºó¶Ë·þÎñ...
+echo ·þÎñµØÖ·: http://127.0.0.1:28000
+echo API ÎÄµµ: http://127.0.0.1:28000/docs
 echo.
-echo æŒ‰ Ctrl+C åœæ­¢æœåŠ¡
+echo °´ Ctrl+C Í£Ö¹·þÎñ
 echo.
 
 python backend/main.py

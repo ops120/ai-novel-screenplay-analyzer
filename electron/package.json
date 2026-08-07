@@ -24,8 +24,7 @@
       "databasePersistence.js",
       "preload.js",
       "frontend/**/*",
-      "backend/**/*",
-      "icon.ico"
+      "backend/**/*"
     ],
     "extraResources": [
       {
@@ -45,7 +44,6 @@
           "arch": ["x64"]
         }
       ],
-      "icon": "icon.ico",
       "artifactName": "${productName}-${version}-${arch}.${ext}"
     },
     "nsis": {
@@ -55,9 +53,6 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "小说剧本智能分析工作台",
-      "installerIcon": "icon.ico",
-      "uninstallerIcon": "icon.ico",
-      "installerHeaderIcon": "icon.ico",
       "deleteAppDataOnUninstall": false,
       "language": "2052"
     },
