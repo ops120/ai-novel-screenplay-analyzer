@@ -175,15 +175,20 @@
   background: var(--surface);
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
   flex: 1;
   min-height: 0;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(120, 130, 145, 0.45) transparent;
 }
 .nl-sb-section {
   padding: 14px 16px;
   border-bottom: 1px solid var(--line-soft);
 }
-.nl-sb-section-flex { flex: 1; overflow-y: auto; }
+.nl-sb-section-flex { flex: 0 0 auto; }
 .nl-sb-h {
   display: flex; align-items: center; justify-content: space-between;
   margin-bottom: 10px;
@@ -248,7 +253,7 @@
 .nl-sb-new input:focus { outline: none; border-color: var(--ink); }
 
 /* 项目列表 */
-.nl-proj-list { display: flex; flex-direction: column; gap: 6px; }
+.nl-proj-list { display: flex; flex-direction: column; gap: 6px; padding: 2px 4px 14px 0; }
 .nl-proj {
   padding: 10px 12px;
   border-radius: var(--r-sm);
@@ -1105,24 +1110,33 @@
 }
 .nl-left-drawer-close:hover { background: var(--line); color: var(--ink); }
 .nl-left-drawer-body {
-  padding: 14px 20px;
-  overflow-y: scroll;
+  padding: 14px 16px 18px 20px;
+  overflow-y: auto;
   flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
+  scrollbar-gutter: stable;
   scrollbar-width: thin;
-  scrollbar-color: var(--line, #d6dde6) transparent;
+  scrollbar-color: rgba(120, 130, 145, 0.45) transparent;
 }
-.nl-left-drawer-body::-webkit-scrollbar { width: 6px; height: 6px; }
-.nl-left-drawer-body::-webkit-scrollbar-track { background: transparent; }
+.nl-left-drawer-body::-webkit-scrollbar { width: 10px; height: 10px; }
+.nl-left-drawer-body::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.04);
+  border-radius: 8px;
+  margin: 4px 0;
+}
 .nl-left-drawer-body::-webkit-scrollbar-thumb {
-  background: var(--line-soft, #e5e8ee);
-  border-radius: 4px;
+  background: rgba(120, 130, 145, 0.45);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
   transition: background 0.15s;
 }
 .nl-left-drawer-body::-webkit-scrollbar-thumb:hover {
-  background: var(--ink-faint, #b0b6c1);
+  background: rgba(80, 95, 120, 0.75);
+  background-clip: padding-box;
 }
 
 /* 关系演化左侧抽屉：抽屉宽度由 RelationshipTimeline workspace 决定 */
@@ -1927,9 +1941,22 @@
 
 /* ==================== 滚动条 ==================== */
 .nl-sidebar ::-webkit-scrollbar,
-.nl-ins-body ::-webkit-scrollbar { width: 6px; height: 6px; }
+.nl-ins-body ::-webkit-scrollbar { width: 10px; height: 10px; }
+.nl-sidebar ::-webkit-scrollbar-track,
+.nl-ins-body ::-webkit-scrollbar-track { background: rgba(0, 0, 0, 0.04); border-radius: 8px; margin: 4px 0; }
 .nl-sidebar ::-webkit-scrollbar-thumb,
-.nl-ins-body ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+.nl-ins-body ::-webkit-scrollbar-thumb {
+  background: rgba(120, 130, 145, 0.45);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  transition: background 0.15s;
+}
+.nl-sidebar ::-webkit-scrollbar-thumb:hover,
+.nl-ins-body ::-webkit-scrollbar-thumb:hover {
+  background: rgba(80, 95, 120, 0.75);
+  background-clip: padding-box;
+}
 
 /* ==================== 标记高亮 ==================== */
 mark {
