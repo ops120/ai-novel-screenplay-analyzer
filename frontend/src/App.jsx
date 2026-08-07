@@ -985,7 +985,7 @@ export default function App() {
             {/* v2.5：label 包 file input 兼容所有浏览器（Edge/旧 Safari 下
                 display:none 的 input 调 .click() 会被拦截）。点击 label = 点击 input。 */}
             <label
-              className={`nl-btn outline ${!s.currentProjectId ? 'is-disabled' : ''}`}
+              className="secondary-button text-file-import-control"
               title={s.currentProjectId ? '导入文本' : '请先选择项目'}
             >
               导入文本
@@ -994,7 +994,7 @@ export default function App() {
                 type="file"
                 accept=".txt"
                 onChange={handleTextFile}
-                style={{ position: 'absolute', width: 1, height: 1, opacity: 0, pointerEvents: 'none' }}
+                className="text-file-input-native"
                 disabled={!s.currentProjectId}
               />
             </label>

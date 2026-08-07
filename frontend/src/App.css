@@ -1965,3 +1965,29 @@ mark {
   padding: 0 2px;
   border-radius: 2px;
 }
+
+/* ==================== Import-text control ====================
+/* Drawer "import text" button wraps a directly clickable native file input (v2.5 contract) */
+.secondary-button {
+  position: relative;
+  display: block;
+  padding: 8px 12px;
+  border-radius: var(--r-sm);
+  font-size: 12px; font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--ink);
+  text-align: center;
+  font-family: var(--sans);
+}
+.secondary-button:hover { border-color: var(--ink); }
+.secondary-button:has(.text-file-input-native:disabled) { opacity: 0.5; cursor: not-allowed; }
+.text-file-input-native {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.text-file-input-native:disabled { cursor: not-allowed; }
+

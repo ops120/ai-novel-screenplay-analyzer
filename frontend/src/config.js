@@ -1,7 +1,9 @@
 // 小说剧本智能分析工作台配置文件
 
 // v22.1：API_BASE 集中管理，走 Vite proxy / 生产 nginx
-export const API_BASE = '/api';
+import { resolveApiBase } from './apiBase.js';
+
+export const API_BASE = resolveApiBase({ protocol: globalThis.location?.protocol });
 
 export const CONFIG = {
   // Debug 模式

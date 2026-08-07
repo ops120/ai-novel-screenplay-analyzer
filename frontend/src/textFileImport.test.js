@@ -7,7 +7,7 @@ const appCss = readFileSync(new URL('./App.css', import.meta.url), 'utf8');
 
 test('the visible import-text control is a directly clickable native file input', () => {
   const control = appSource.match(
-    /<label className="secondary-button text-file-import-control">[\s\S]*?<\/label>/,
+    /<label\s+className="secondary-button text-file-import-control"[^>]*>[\s\S]*?<\/label>/,
   );
 
   assert.ok(control, 'missing the native import-text control');

@@ -2,12 +2,13 @@ import { create } from 'zustand';
 import { API_BASE, loadConfig, saveConfig } from './config.js';
 import * as taskManager from './taskManager.js';
 import { getFailure, clearFailure } from './failureStore.js';
+import { readSelectedLlmId, writeSelectedLlmId, clearLegacyLlmConfig, resolveSelectedLlmId } from './llmSelection.js';
 
 // 加载配置
 const config = loadConfig();
 
 // v24.4.6：清除旧版llm_config（迁移到 llmSelection.js）
-try { localStorage.removeItem('llm_config'); } catch {}
+clearLegacyLlmConfig(localStorage);
 
 // 安装 task bridge（只一次）
 let _bridgeInstalled = false;
@@ -26,10 +27,13 @@ export const useStore = create((set, get) => {
   // 安装 task bridge
   installTaskBridge(set, get);
 
+  // LLM model fetch ordering guard: stale responses must not overwrite newer ones
+  let llmFetchSeq = 0;
+
   return {
   // ==================== 基础状态====================
   projects: [],
-  projectError: null,       // v22.1：项目列表加载错误
+  projectError: '',       // v22.1：项目列表加载错误
   currentProjectId: null,
   nodes: [],
   edges: [],
@@ -182,23 +186,31 @@ export const useStore = create((set, get) => {
   cancelTaskById: (id) => taskManager.cancelTask(id),
   removeTaskById: (id) => taskManager.removeTask(id),
 
-  clearProjectError: () => set({ projectError: null }),
+  clearProjectError: () => set({ projectError: '' }),
 
   // ==================== LLM 模型管理 ====================
 
   fetchLlmModels: async () => {
+    const seq = ++llmFetchSeq;
     try {
       const res = await fetch(`${API_BASE}/llm-models`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      set({ llmModels: data });
-      // 自动选择默认模型
-      const defaultModel = data.find(m => m.is_default);
-      if (defaultModel && !get().currentLlmId) {
-        set({ currentLlmId: defaultModel.id });
+      if (seq !== llmFetchSeq) return;
+      if (!Array.isArray(data)) return;
+      if (data.length === 0) {
+        set({ llmModels: [], currentLlmId: null });
+        writeSelectedLlmId(localStorage, null);
+        return;
       }
+      const resolved = resolveSelectedLlmId(data, {
+        currentId: get().currentLlmId,
+        persistedId: readSelectedLlmId(localStorage),
+      });
+      set({ llmModels: data, currentLlmId: resolved });
+      writeSelectedLlmId(localStorage, resolved);
     } catch (e) {
-      console.error("获取 LLM 模型失败", e);
+      console.error('fetch LLM models failed', e);
     }
   },
 
@@ -244,7 +256,6 @@ export const useStore = create((set, get) => {
       const r = await res.json();
       if (r.status === 'success') {
         await get().fetchLlmModels();
-        if (get().currentLlmId === id) set({ currentLlmId: null });
         return { success: true };
       }
       return { success: false };
@@ -266,7 +277,11 @@ export const useStore = create((set, get) => {
     }
   },
 
-  selectLlmModel: (id) => set({ currentLlmId: id }),
+  selectLlmModel: (id) => {
+    const matched = get().llmModels.find(m => String(m.id) === String(id))?.id ?? null;
+    set({ currentLlmId: matched });
+    writeSelectedLlmId(localStorage, matched);
+  },
 
   // ==================== 项目管理 ====================
 
@@ -275,7 +290,7 @@ export const useStore = create((set, get) => {
       const res = await fetch(`${API_BASE}/projects`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      set({ projects: data, projectError: null });
+      set({ projects: data, projectError: '' });
     } catch (e) {
       console.error("获取项目失败", e);
       set({ projectError: e.message });
@@ -289,6 +304,7 @@ export const useStore = create((set, get) => {
       nodes: [],
       edges: [],
       isLoadingProject: true,
+      projectError: '',
       selectedNodeId: null,
       graphRange: { from: 0, to: 0 },
       graphScope: 'preview',
@@ -321,7 +337,7 @@ export const useStore = create((set, get) => {
     } catch (e) {
       console.error("获取项目数据失败", e);
       if (get().currentProjectId === currentId) {
-        set({ nodes: [], edges: [], isLoadingProject: false });
+        set({ nodes: [], edges: [], isLoadingProject: false, projectError: e.message });
       }
     }
   },
@@ -329,6 +345,7 @@ export const useStore = create((set, get) => {
   createProject: async (name) => {
     if (!name.trim()) return;
     try {
+      set({ projectError: '' });
       const res = await fetch(`${API_BASE}/projects`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -336,14 +353,16 @@ export const useStore = create((set, get) => {
       });
       if (res.status === 409) {
         const r = await res.json();
-        set({ projectError: `重名：{r.existing_id}` });
+        set({ projectError: `重名：${r.existing_id}` });
         return;
       }
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
       const p = await res.json();
       await get().fetchProjects();
-      get().selectProject(p.id);
+      await get().selectProject(p.id);
     } catch (e) {
       console.error("创建项目失败", e);
+      throw e;
     }
   },
 
@@ -353,7 +372,7 @@ export const useStore = create((set, get) => {
       if (res.ok) {
         await get().fetchProjects();
         if (get().currentProjectId === id) {
-          set({ currentProjectId: null, nodes: [], edges: [] });
+          set({ currentProjectId: null, nodes: [], edges: [], isLoadingProject: false, projectError: '' });
         }
       }
     } catch (e) {
@@ -379,6 +398,17 @@ export const useStore = create((set, get) => {
   },
 
   // ==================== v24 炼化（走 taskManager）===================
+
+  updateProjectDescription: async (pid, description) => {
+    const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(pid)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: '', description }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    await get().fetchProjects();
+    return { ok: true };
+  },
 
   analyzeText: async (text, concurrency = 3, chunkSizeOverride) => {
     // v26.3：传 chunkSizeOverride 时优先使用（导入页面最新值），fallback 到store 全局
