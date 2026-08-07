@@ -117,7 +117,7 @@ screenshots/
 _commitmsg*.txt
 
 # 内部 AI 工作流文档（计划/规格，不入库）
-docs/superpowers/
+docs/
 
 # Vite 模板写料资源（未使用）
 frontend/src/assets/react.svg
