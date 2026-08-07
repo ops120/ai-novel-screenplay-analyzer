@@ -1,7 +1,9 @@
 import { create } from 'zustand';
 import { API_BASE, loadConfig, saveConfig } from './config.js';
 import * as taskManager from './taskManager.js';
+import { listTasks as apiListTasks, createTask as apiCreateTask, patchTask as apiPatchTask, deleteTask as apiDeleteTask, rowToTask as apiRowToTask } from './taskApi.js';
 import { getFailure, clearFailure } from './failureStore.js';
+import { listProgress, clearProgress } from './progressStore.js';
 import { readSelectedLlmId, writeSelectedLlmId, clearLegacyLlmConfig, resolveSelectedLlmId } from './llmSelection.js';
 
 // 加载配置
@@ -15,12 +17,130 @@ let _bridgeInstalled = false;
 function installTaskBridge(set, get) {
   if (_bridgeInstalled) return;
   _bridgeInstalled = true;
-  // 初始快照
-  set({ tasks: taskManager.getTasksSnapshot() });
-  // 订阅变更
-  taskManager.subscribe(() => {
-    set({ tasks: taskManager.getTasksSnapshot() });
-  });
+  // v28: 后端任务引擎。store.tasks 维持最近一次轮询的结果；
+  // 异步轮询由 startBackendTaskPolling() 启动。
+  set({ tasks: [] });
+  // 异步轮询由 App.jsx mount 时调用 startBackendTaskPolling(); 测试不启动
+}
+
+// v28: 后端任务轮询
+// 有 active 任务时 2.5s 一次，其他情况 5s 一次。
+let _pollingTimer = null;
+let _pollingInterval = 5000;
+function startBackendTaskPolling(set, get) {
+  if (_pollingTimer) return;
+  const tick = async () => {
+    try {
+      const tasks = await fetchAllTasks(get);
+      set({ tasks });
+      // 调整轮询频率：有 active 任务时 2.5s 一次，其他情况 5s 一次。
+      const hasActive = tasks.some(t => ['running', 'paused', 'queued'].includes(t.status));
+      const newInterval = hasActive ? 2500 : 5000;
+      if (newInterval !== _pollingInterval) {
+        _pollingInterval = newInterval;
+        if (_pollingTimer) { clearInterval(_pollingTimer); _pollingTimer = null; }
+        _pollingTimer = setInterval(tick, _pollingInterval);
+      }
+    } catch (e) {
+      // 忽略轮询错误（后端可能重启中）
+    }
+  };
+  _pollingInterval = 5000;
+  tick();
+  _pollingTimer = setInterval(tick, _pollingInterval);
+}
+
+function stopBackendTaskPolling() {
+  if (_pollingTimer) {
+    clearInterval(_pollingTimer);
+    _pollingTimer = null;
+  }
+}
+
+// v28-fix: 全局任务拉取（不依赖选中项目）
+// - 拉取所有项目的后端任务（projects + currentProjectId + 旧断点涉及的 pid）
+// - 把旧版浏览器执行残留的 analysis_progress 断点恢复为「已中断 · 待继续」卡片；
+//   项目已有后端任务行时跳过（避免重复），已完成（lastCompleted>=total）自动消失。
+function legacyRowToTask(p) {
+  const pid = p.projectId || p.project_id;
+  const total = Number(p.totalChunks ?? p.total_chunks ?? 0);
+  const lastCompleted = Number(p.lastCompleted ?? p.last_completed ?? 0);
+  const chunkSize = Number(p.chunkSize ?? p.chunk_size ?? 0);
+  const concurrency = Number(p.concurrency || 3);
+  return {
+    id: `legacy:${pid}`,
+    kind: 'continue',
+    projectId: pid,
+    projectName: '',
+    modelName: p.llmModelName || p.llm_model_name || '',
+    status: 'interrupted',
+    total,
+    overallTotal: total,
+    completed: lastCompleted,
+    lastCompleted,
+    successCount: lastCompleted,
+    failedCount: 0,
+    rateLimitCount: 0,
+    degraded: false,
+    initialConcurrency: concurrency,
+    currentConcurrency: concurrency,
+    concurrency,
+    chapterFrom: p.chapterFrom || p.chapter_from || '',
+    chapterTo: p.chapterTo || p.chapter_to || '',
+    chunkSize,
+    createdAt: typeof p.timestamp === 'number' ? p.timestamp : Date.now(),
+    startedAt: 0,
+    finishedAt: 0,
+    updatedAt: typeof p.timestamp === 'number' ? p.timestamp : Date.now(),
+    errorMessage: '',
+    failedChunks: [],
+    chunks: [],
+    chunkMetas: [],
+    startIndex: lastCompleted,
+    progress: total > 0 ? Math.min(100, Math.round((lastCompleted / total) * 100)) : 0,
+    isPaused: false,
+    llmModelId: '',
+    systemPrompt: '',
+  };
+}
+async function fetchAllTasks(get) {
+  const s = get();
+  const pids = new Set();
+  if (s.currentProjectId) pids.add(s.currentProjectId);
+  for (const p of s.projects || []) {
+    if (p && p.id) pids.add(p.id);
+  }
+  let legacyRows = [];
+  try { legacyRows = await listProgress(); } catch (e) { /* 后端可能无该接口 */ }
+  for (const p of legacyRows) {
+    if (p && (p.projectId || p.project_id)) pids.add(p.projectId || p.project_id);
+  }
+  if (pids.size === 0) return [];
+  const all = [];
+  await Promise.all([...pids].map(async (pid) => {
+    try {
+      const res = await apiListTasks(pid);
+      for (const row of res.tasks || []) {
+        const t = apiRowToTask(row);
+        if (t) all.push(t);
+      }
+    } catch (e) { /* 项目可能刚被删除 */ }
+  }));
+  const withTasks = new Set(all.map(t => String(t.projectId)));
+  for (const p of legacyRows) {
+    if (!p || !(p.projectId || p.project_id)) continue;
+    if (withTasks.has(String(p.projectId || p.project_id))) continue;
+    if ((Number(p.lastCompleted ?? p.last_completed ?? 0)) >= (Number(p.totalChunks ?? p.total_chunks ?? 0))) continue;
+    all.push(legacyRowToTask(p));
+  }
+  return all;
+}
+
+// 小工具：把任务清单更新到 store
+async function refreshTasks(set, get) {
+  const tasks = await fetchAllTasks(get);
+  set({ tasks });
+  return tasks;
 }
 
 export const useStore = create((set, get) => {
@@ -181,10 +301,89 @@ export const useStore = create((set, get) => {
   },
 
   // v24：任务管理actions
-  pauseTaskById: (id) => taskManager.pauseTask(id),
-  resumeTaskById: (id) => taskManager.resumeTask(id),
-  cancelTaskById: (id) => taskManager.cancelTask(id),
-  removeTaskById: (id) => taskManager.removeTask(id),
+  pauseTaskById: async (id) => {
+    const t = (get().tasks || []).find(x => x.id === id);
+    if (!t) return;
+    try { await apiPatchTask(t.projectId, id, { action: 'pause' }); } catch (e) { console.warn('pauseTaskById', e); }
+    await refreshTasks(set, get);
+  },
+  resumeTaskById: async (id) => {
+    const t = (get().tasks || []).find(x => x.id === id);
+    if (!t) return;
+    try { await apiPatchTask(t.projectId, id, { action: 'resume' }); } catch (e) { console.warn('resumeTaskById', e); }
+    await refreshTasks(set, get);
+  },
+  cancelTaskById: async (id) => {
+    const t = (get().tasks || []).find(x => x.id === id);
+    if (!t) return;
+    try { await apiPatchTask(t.projectId, id, { action: 'cancel' }); } catch (e) { console.warn('cancelTaskById', e); }
+    await refreshTasks(set, get);
+  },
+  removeTaskById: async (id) => {
+    const t = (get().tasks || []).find(x => x.id === id);
+    if (!t) return;
+    try { await apiDeleteTask(t.projectId, id); } catch (e) { console.warn('removeTaskById', e); }
+    await refreshTasks(set, get);
+  },
+  updateTaskParams: async (id, patch) => {
+    const t = (get().tasks || []).find(x => x.id === id);
+    if (!t) return;
+    if (patch && Number.isFinite(patch.concurrency) && patch.concurrency > 0) {
+      try { await apiPatchTask(t.projectId, id, { action: 'set_concurrency', concurrency: patch.concurrency }); } catch (e) { console.warn('updateTaskParams set_concurrency', e); }
+    }
+    // chunkSize 变化在剩下任务终止后由 store 更新
+    if (patch && Number.isFinite(patch.chunkSize) && patch.chunkSize > 0) {
+      const tasks = (get().tasks || []).map(x => x.id === id ? { ...x, chunkSize: patch.chunkSize } : x);
+      set({ tasks });
+    }
+    await refreshTasks(set, get);
+  },
+
+  // v28-fix: 引擎任务（后端 tasks 表）中断后继续 —— 用任务行自己的参数建续跑任务
+  continueEngineTask: async (taskId) => {
+    const t = (get().tasks || []).find(x => x.id === taskId);
+    if (!t || !t.projectId) return;
+    const concurrency = Number.isFinite(t.concurrency) && t.concurrency > 0
+      ? Math.min(8, Math.max(1, t.concurrency))
+      : 3;
+    try {
+      const payload = t.kind === 'retry'
+        ? {
+            kind: 'retry',
+            chunk_size: t.chunkSize || 1000,
+            concurrency,
+            llm_model_id: t.llmModelId,
+            system_prompt: t.systemPrompt || '',
+            old_chunk_size: t.chunkSize || 1000,
+            failure_indexes: (t.failedChunks || []).map(c => c.chunkIndex),
+            text: null,
+          }
+        : {
+            kind: 'continue',
+            chunk_size: t.chunkSize || 1000,
+            concurrency,
+            llm_model_id: t.llmModelId,
+            system_prompt: t.systemPrompt || '',
+            chapter_from: t.chapterFrom || '',
+            chapter_to: t.chapterTo || '',
+            start_index: t.lastCompleted || 0,
+            text: null,
+          };
+      const created = await apiCreateTask(t.projectId, payload);
+      // 旧任务行不再以「待继续」展示
+      try { await apiPatchTask(t.projectId, taskId, { action: 'cancel' }); } catch {}
+      set({ isAnalyzing: true, progress: 0, isPaused: false });
+      await refreshTasks(set, get);
+      return created;
+    } catch (e) {
+      if (e && (e.errorCode === 'task_already_active' || e.status === 409)) {
+        alert('该项目已有进行中的任务');
+        return;
+      }
+      console.error('continueEngineTask failed:', e);
+      alert('续跑失败：' + (e?.message || e));
+    }
+  },
 
   clearProjectError: () => set({ projectError: '' }),
 
@@ -331,7 +530,7 @@ export const useStore = create((set, get) => {
       });
 
       // 加载失败记录
-      const failure = getFailure(pid);
+      const failure = await getFailure(pid);
       if (failure) set({ lastFailure: failure });
       else set({ lastFailure: null });
     } catch (e) {
@@ -370,9 +569,10 @@ export const useStore = create((set, get) => {
     try {
       const res = await fetch(`${API_BASE}/projects/${id}`, { method: 'DELETE' });
       if (res.ok) {
+        // v28: 后端 FK CASCADE 处理\uff1b剩下 task 记录被删除
         await get().fetchProjects();
         if (get().currentProjectId === id) {
-          set({ currentProjectId: null, nodes: [], edges: [], isLoadingProject: false, projectError: '' });
+          set({ currentProjectId: null, nodes: [], edges: [], isLoadingProject: false, projectError: '', lastFailure: null, tasks: [] });
         }
       }
     } catch (e) {
@@ -411,7 +611,7 @@ export const useStore = create((set, get) => {
   },
 
   analyzeText: async (text, concurrency = 3, chunkSizeOverride) => {
-    // v26.3：传 chunkSizeOverride 时优先使用（导入页面最新值），fallback 到store 全局
+    // v28: 后端任务引擎
     const { currentProjectId, currentLlmId, llmModels, systemPrompt, chapterFrom, chapterTo } = get();
     const chunkSize = chunkSizeOverride ?? get().chunkSize;
     if (!currentProjectId) return;
@@ -419,117 +619,98 @@ export const useStore = create((set, get) => {
 
     const selectedModel = llmModels.find(m => m.id === currentLlmId);
     if (!selectedModel) {
-      alert("请先在模型管理'中配置并选择一个LLM 模型");
+      alert("请先在模型管理中配置并选择一个 LLM 模型");
       return;
     }
 
-    // v26.1：text=null 时不传全文到 taskManager
-    // v26.2：createAnalyzeTask 异步（text=null 时拉 chunk-metas）
-    const task = await taskManager.createAnalyzeTask({
-      projectId: currentProjectId,
-      projectName: get().projects.find(p => p.id === currentProjectId)?.name || '',
-      modelName: selectedModel.name,
-      modelId: currentLlmId,
-      systemPrompt,
-      text: text,  // null = 后端加载
-      chunkSize,
-      concurrency,
-      chapterFrom: chapterFrom || undefined,
-      chapterTo: chapterTo || undefined,
-    });
-
-    if (!task) {
-      alert('该项目已有进行中的任务');
-      return;
-    }
-
-    // 订阅进度
-    const unsub = taskManager.subscribeTask(task.id, (t) => {
-      set({
-        runStats: { successCount: t.successCount, failedCount: t.failedCount, totalChunks: t.total },
-        activeProgress: { completed: t.completed, total: t.total, failedCount: t.failedCount, rateLimitCount: t.rateLimitCount, degraded: t.degraded },
-        isPaused: t.status === 'paused',
-        progress: t.total > 0 ? Math.round((t.completed / t.total) * 100) : 0,
+    try {
+      // 粘贴 / 小文本：传 text 到后端
+      // 大文本（传 null）：后端按 project_id 取原文
+      const useText = (text != null && text.trim()) ? text : null;
+      const created = await apiCreateTask(currentProjectId, {
+        kind: 'analyze',
+        chunk_size: chunkSize,
+        concurrency,
+        llm_model_id: currentLlmId,
+        system_prompt: systemPrompt,
+        chapter_from: chapterFrom ? String(chapterFrom) : '',
+        chapter_to: chapterTo ? String(chapterTo) : '',
+        text: useText,
       });
-
-      if (['completed', 'failed', 'cancelled'].includes(t.status)) {
-        set({ isAnalyzing: false, progress: 0, activeProgress: null });
-        unsub();
-        // 刷新项目数据
-        if (t.status === 'completed') {
-          get().selectProject(currentProjectId);
-        }
-        // 保存失败记录
-        if (t.failedChunks?.length) {
-          set({ lastFailure: { chunks: t.failedChunks, totalChunks: t.total, chunkSize } });
-        }
+      set({ isAnalyzing: true, progress: 0, isPaused: false });
+      await refreshTasks(set, get);
+      // 刷新项目数据
+      get().selectProject(currentProjectId);
+      return created;
+    } catch (e) {
+      if (e && (e.errorCode === 'task_already_active' || e.status === 409)) {
+        alert('请注意：该项目已有进行中的任务');
+        return;
       }
-    });
-
-    set({ isAnalyzing: true, progress: 0, isPaused: false });
+      if (e && e.errorCode === 'project_text_not_found') {
+        alert('请先导入文本（大文本模式）');
+        return;
+      }
+      console.error('analyzeText failed:', e);
+      alert('创建任务失败：' + (e?.message || e));
+    }
   },
 
-  continueAnalysis: async () => {
+  // v27-fix: 接受卡片上的 overrides。卡片编辑过的并发/分片优先于后端断点旧值。
+  // overrides = { chunkSize?: number, concurrency?: number } —— 未传或非法值回落 progress。
+  // overrides = { chunkSize?: number, concurrency?: number }
+  continueAnalysis: async (overrides = {}) => {
     const { currentProjectId, currentLlmId, llmModels, systemPrompt } = get();
     if (!currentProjectId) return;
 
     const selectedModel = llmModels.find(m => m.id === currentLlmId);
     if (!selectedModel) return;
 
-    let task;
+    let progress;
     let chunkSize;
     try {
-      // v25 修复：从 progressStore 拉单条断点详情（含原文），createContinueTask 需要progress 字段
       const { getProgress } = await import('./progressStore.js');
-      const progress = await getProgress(currentProjectId);
+      progress = await getProgress(currentProjectId);
       if (!progress) {
         alert('未找到断点记录，请重新发起分析');
         return;
       }
-      chunkSize = progress.chunkSize;
+      const overrideChunkSize = Number.isFinite(overrides?.chunkSize) && overrides.chunkSize > 0
+        ? overrides.chunkSize : null;
+      chunkSize = overrideChunkSize != null ? overrideChunkSize : progress.chunkSize;
       if (!Number.isFinite(chunkSize) || chunkSize <= 0) {
         alert('断点记录缺少有效的chunkSize，请重新发起分析');
         return;
       }
-
-      // v26.2：createContinueTask 异步（progress.text 为空时拉 chunk-metas）
-      task = await taskManager.createContinueTask({
-      projectId: currentProjectId,
-      projectName: get().projects.find(p => p.id === currentProjectId)?.name || '',
-      modelName: selectedModel.name,
-      modelId: currentLlmId,
-      systemPrompt,
-      chunkSize,
-      progress,
-    });
-
-      if (!task) {
-        alert('该项目已有进行中的任务');
+      const concurrency = Number.isFinite(overrides?.concurrency) && overrides.concurrency > 0
+        ? Math.min(8, Math.max(1, overrides.concurrency))
+        : (progress.concurrency || 3);
+      // v28: 后端 POST tasks (kind=continue)
+      const created = await apiCreateTask(currentProjectId, {
+        kind: 'continue',
+        chunk_size: chunkSize,
+        concurrency,
+        llm_model_id: currentLlmId,
+        system_prompt: systemPrompt,
+        chapter_from: progress.chapterFrom || '',
+        chapter_to: progress.chapterTo || '',
+        start_index: progress.lastCompleted || 0,
+        // 大文本：text=null 后端按 project_id 取原文
+        text: null,
+      });
+      set({ isAnalyzing: true, progress: 0, isPaused: false });
+      // v28-fix: 旧断点已迁入后端任务，清掉以免下次轮询重复显示「已中断」卡
+      try { await clearProgress(currentProjectId); } catch {}
+      await refreshTasks(set, get);
+      get().selectProject(currentProjectId);
+      return created;
+    } catch (e) {
+      if (e && (e.errorCode === 'task_already_active' || e.status === 409)) {
+        alert('请注意：该项目已有进行中的任务');
         return;
       }
-
-      const unsub = taskManager.subscribeTask(task.id, (t) => {
-        set({
-          runStats: { successCount: t.successCount, failedCount: t.failedCount, totalChunks: t.total },
-          activeProgress: { completed: t.completed, total: t.total, failedCount: t.failedCount, rateLimitCount: t.rateLimitCount, degraded: t.degraded },
-          isPaused: t.status === 'paused',
-          progress: t.total > 0 ? Math.round((t.completed / t.total) * 100) : 0,
-        });
-
-        if (['completed', 'failed', 'cancelled'].includes(t.status)) {
-          set({ isAnalyzing: false, progress: 0, activeProgress: null });
-          unsub();
-          if (t.status === 'completed') get().selectProject(currentProjectId);
-          if (t.failedChunks?.length) {
-            set({ lastFailure: { chunks: t.failedChunks, totalChunks: t.total, chunkSize } });
-          }
-        }
-      });
-
-      set({ isAnalyzing: true, progress: 0, isPaused: false });
-    } catch (err) {
-      console.error('continueAnalysis failed:', err);
-      alert('继续分析失败：'+ (err?.message || err));
+      console.error('continueAnalysis failed:', e);
+      alert('续跑分析失败：' + (e?.message || e));
     }
   },
 
@@ -542,126 +723,53 @@ export const useStore = create((set, get) => {
     const selectedModel = llmModels.find(m => m.id === currentLlmId);
     if (!selectedModel) return;
 
-    // v26.2：createRetryFailedTask 异步（failure.text 为空时拉 chunk-metas）
-    const task = await taskManager.createRetryFailedTask({
-      projectId: currentProjectId,
-      projectName: get().projects.find(p => p.id === currentProjectId)?.name || '',
-      modelName: selectedModel.name,
-      modelId: currentLlmId,
-      systemPrompt,
-      chunkSize: cs,
-      concurrency,
-      failedChunks: lastFailure.chunks,
-      totalChunks: lastFailure.totalChunks,
-    });
-
-    if (!task) {
-      alert('该项目已有进行中的任务');
-      return;
-    }
-
-    const unsub = taskManager.subscribeTask(task.id, (t) => {
-      set({
-        runStats: { successCount: t.successCount, failedCount: t.failedCount, totalChunks: t.total },
-        activeProgress: { completed: t.completed, total: t.total, failedCount: t.failedCount, rateLimitCount: t.rateLimitCount, degraded: t.degraded },
-        isPaused: t.status === 'paused',
-        progress: t.total > 0 ? Math.round((t.completed / t.total) * 100) : 0,
+    try {
+      // v28: 后端 retry
+      const failureIndexes = (lastFailure.chunks || []).map(c => c.chunkIndex);
+      const oldChunkSize = lastFailure.chunkSize || cs;
+      const created = await apiCreateTask(currentProjectId, {
+        kind: 'retry',
+        chunk_size: cs,
+        concurrency,
+        llm_model_id: currentLlmId,
+        system_prompt: systemPrompt,
+        old_chunk_size: oldChunkSize,
+        failure_indexes: failureIndexes,
+        text: null,  // 大文本模式
       });
-
-      if (['completed', 'failed', 'cancelled'].includes(t.status)) {
-        set({ isAnalyzing: false, progress: 0, activeProgress: null });
-        unsub();
-        if (t.status === 'completed') {
-          get().selectProject(currentProjectId);
-          clearFailure(currentProjectId);
-          set({ lastFailure: null });
-        }
+      set({ isAnalyzing: true, progress: 0, isPaused: false });
+      await refreshTasks(set, get);
+      get().selectProject(currentProjectId);
+      // 重试后清除失败记录
+      try { await clearFailure(currentProjectId); } catch {}
+      set({ lastFailure: null });
+      return created;
+    } catch (e) {
+      if (e && (e.errorCode === 'task_already_active' || e.status === 409)) {
+        alert('请注意：该项目已有进行中的任务');
+        return;
       }
-    });
-
-    set({ isAnalyzing: true, progress: 0, isPaused: false });
+      console.error('retryFailedChunks failed:', e);
+      alert('重试失败：' + (e?.message || e));
+    }
   },
 
-  // v20：暂停继续
+  // v28: 后端 task 轮询控制
+  startBackendTaskPolling: () => { startBackendTaskPolling(set, get); },
+  stopBackendTaskPolling: () => { stopBackendTaskPolling(); },
+  refreshTasksNow: async () => { await refreshTasks(set, get); return get().tasks; },
+
+  // v28: 后端命令
   pauseAnalysis: () => {
     const { tasks } = get();
-    const active = tasks.find(t => t.status === 'running');
-    if (active) taskManager.pauseTask(active.id);
+    const active = (tasks || []).find(t => t.status === 'running');
+    if (active) get().pauseTaskById(active.id);
   },
 
   resumeAnalysis: () => {
     const { tasks } = get();
-    const paused = tasks.find(t => t.status === 'paused');
-    if (paused) taskManager.resumeTask(paused.id);
-  },
-
-  // 清除失败记录
-  clearLastFailure: () => {
-    const { currentProjectId } = get();
-    if (currentProjectId) clearFailure(currentProjectId);
-    set({ lastFailure: null });
-  },
-
-  // ==================== 导入/导出 ====================
-
-  exportProject: async () => {
-    const { currentProjectId, projects } = get();
-    if (!currentProjectId) { alert('请先选择一个项目'); return; }
-    try {
-      const res = await fetch(`${API_BASE}/projects/${currentProjectId}/export`);
-      const data = await res.json();
-      const project = projects.find(p => p.id === currentProjectId);
-      const exportData = {
-        project: { name: project?.name || 'Untitled' },
-        nodes: data.nodes || [],
-        edges: data.edges || []
-      };
-      const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${project?.name || 'project'}_${Date.now()}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      console.error('导出项目失败', e);
-    }
-  },
-
-  importProject: async (file) => {
-    try {
-      const text = await file.text();
-      const data = JSON.parse(text);
-      const res = await fetch(`${API_BASE}/projects/import`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data)
-      });
-      const result = await res.json();
-      if (result.status === 'success') {
-        await get().fetchProjects();
-        await get().selectProject(result.project_id);
-      } else {
-        throw new Error(result.message || '导入失败');
-      }
-    } catch (e) {
-      console.error('导入项目失败', e);
-      alert('导入失败: ' + e.message);
-    }
-  },
-
-  cleanupDuplicates: async (projectId) => {
-    try {
-      const res = await fetch(`${API_BASE}/projects/${projectId}/cleanup`, { method: 'POST' });
-      const result = await res.json();
-      if (result.status === 'success') {
-        await get().selectProject(projectId);
-        return result;
-      }
-    } catch (e) {
-      console.error("清理失败", e);
-      return null;
-    }
+    const paused = (tasks || []).find(t => t.status === 'paused');
+    if (paused) get().resumeTaskById(paused.id);
   },
   };
 });

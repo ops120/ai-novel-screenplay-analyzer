@@ -1582,6 +1582,18 @@
 .task-param-sep {
   color: var(--ink-faint, #8c8779);
 }
+.task-param-editable {
+  display: inline-flex; align-items: center; gap: 4px;
+}
+.task-param-input {
+  width: 64px; padding: 1px 4px; border: 1px solid var(--line-soft);
+  border-radius: 3px; background: transparent; color: inherit;
+  font: inherit; font-variant-numeric: tabular-nums;
+  outline: none;
+}
+.task-param-input:focus { border-color: var(--accent); background: var(--surface-1, #fff); }
+.task-param-input:disabled { opacity: 0.5; cursor: not-allowed; }
+.task-param-input-conc { width: 44px; }
 .task-kind { color: var(--ink-soft); }
 .task-model { color: var(--ink-faint); }
 

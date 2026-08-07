@@ -40,7 +40,7 @@ function formatRange(from, to) {
   return '';
 }
 
-function TaskRow({ task, projectName, isCurrentProject, onPause, onResume, onCancel, onRemove, onFocus }) {
+function TaskRow({ task, projectName, isCurrentProject, onPause, onResume, onCancel, onRemove, onFocus, onUpdateParams }) {
   const failedChunks = task.failedChunks || [];
   const showFailedToggle = failedChunks.length > 0;
   const detailsRef = useRef(null);
@@ -68,9 +68,44 @@ function TaskRow({ task, projectName, isCurrentProject, onPause, onResume, onCan
         </div>
         {(task.chunkSize || task.concurrency || task.initialConcurrency) && (
           <div className="task-params">
-            {task.chunkSize ? <span className="task-param-tag">{task.chunkSize} 字/片</span> : null}
+            {task.chunkSize ? (
+              <span className="task-param-tag task-param-editable">
+                <input
+                  type="number"
+                  min={100}
+                  step={50}
+                  className="task-param-input"
+                  value={task.chunkSize}
+                  disabled={!onUpdateParams || task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled'}
+                  title="改后下一次重试/续跑生效；当前任务正在跑的切片仍按旧分片"
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value, 10);
+                    if (Number.isFinite(v) && v >= 100) onUpdateParams(task.id, { chunkSize: v });
+                  }}
+                />
+                字/片
+              </span>
+            ) : null}
             {(task.chunkSize && (task.concurrency || task.initialConcurrency)) ? <span className="task-param-sep">·</span> : null}
-            {(task.concurrency || task.initialConcurrency) ? <span className="task-param-tag">{task.concurrency || task.initialConcurrency} 并发</span> : null}
+            {(task.concurrency || task.initialConcurrency) ? (
+              <span className="task-param-tag task-param-editable">
+                <input
+                  type="number"
+                  min={1}
+                  max={8}
+                  step={1}
+                  className="task-param-input task-param-input-conc"
+                  value={task.concurrency || task.initialConcurrency}
+                  disabled={!onUpdateParams || task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled'}
+                  title="实时生效：worker 池会自动补到新上限"
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value, 10);
+                    if (Number.isFinite(v)) onUpdateParams(task.id, { concurrency: v });
+                  }}
+                />
+                并发
+              </span>
+            ) : null}
           </div>
         )}
       </div>
@@ -154,6 +189,8 @@ export default function TaskPanelBody({ guideState, onGuide }) {
   const cancelTaskById = useStore((s) => s.cancelTaskById);
   const removeTaskById = useStore((s) => s.removeTaskById);
   const continueAnalysis = useStore((s) => s.continueAnalysis);
+  const continueEngineTask = useStore((s) => s.continueEngineTask);
+  const updateTaskParams = useStore((s) => s.updateTaskParams);
 
   // v25 修复：interrupted 任务的「继续」要走真实的续跑流程（createContinueTask），
   // 而不是 resumeTaskById（后者只翻 isPaused，对没有 Promise/AbortController 的
@@ -165,7 +202,18 @@ export default function TaskPanelBody({ guideState, onGuide }) {
       if (t.projectId && String(t.projectId) !== String(currentProjectId)) {
         selectProject(t.projectId);
       }
-      continueAnalysis();
+      // v27-fix: 续跑要尊重卡片上的并发/分片编辑。t.chunkSize/concurrency 可能是 undefined（恢复项无值），
+      // store/taskManager 会回落到 progress 旧值。
+      if (String(t.id).startsWith('legacy:')) {
+        // 旧版浏览器断点：迁移到后端引擎（读取 analysis_progress 续跑）
+        continueAnalysis({
+          chunkSize: t.chunkSize,
+          concurrency: t.concurrency,
+        });
+      } else {
+        // 引擎任务中断（如后端重启）：用任务行自身参数续跑
+        continueEngineTask(t.id);
+      }
     } else {
       resumeTaskById(taskId);
     }
@@ -239,6 +287,7 @@ export default function TaskPanelBody({ guideState, onGuide }) {
               onCancel={cancelTaskById}
               onRemove={removeTaskById}
               onFocus={handleFocus}
+              onUpdateParams={updateTaskParams}
             />
           ))}
         </ul>

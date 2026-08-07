@@ -63,6 +63,7 @@ import sqlite3, secrets, json, re, os, asyncio, base64, hashlib, socket, time
 # 需要写入原始文本（999 测试约 15MB，未来长卷可达 30MB+），所以 PUT /api/task-progress/{id}
 # 走专用 64MB 通道，其它端点保持原 10MB 全局防护。
 import progress_repository
+import task_engine
 
 app = FastAPI()
 
@@ -304,6 +305,23 @@ def init_db():
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         )''')
 
+        # v26.3：失败切片记录表——替换前端 localStorage 持久化。
+        # 每项目一行；chunks 存 JSON 数组 [{chunkIndex, message, status?}]。
+        # 删除项目时通过 FK CASCADE 联动清掉。
+        conn.execute('''CREATE TABLE IF NOT EXISTS project_failures (
+            project_id TEXT PRIMARY KEY,
+            chunk_size INTEGER NOT NULL DEFAULT 0,
+            total_chunks INTEGER NOT NULL DEFAULT 0,
+            chunks TEXT NOT NULL DEFAULT '[]',
+            chapter_from TEXT NOT NULL DEFAULT '',
+            chapter_to TEXT NOT NULL DEFAULT '',
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )''')
+
+        # v27: backend task engine - tasks table (schema owned by task_engine).
+        task_engine.init_tasks_schema(conn)
+
         # ---------- v9.1-Fix-2：启动自检（PRAGMA 实际值，不是「我们设过了」） ----------
         journal = conn.execute("PRAGMA journal_mode").fetchone()[0]
         if str(journal).lower() != "wal":
@@ -341,6 +359,12 @@ def init_db():
 
 
 init_db()
+
+# v27: on boot, mark queued/running/paused tasks as interrupted.
+try:
+    task_engine.mark_stale_tasks_interrupted()
+except Exception as _e:
+    print(f"warn: v27 mark_stale_tasks_interrupted failed: {_e}", flush=True)
 
 
 # ==================== 通用 ID 生成 ====================
@@ -671,6 +695,21 @@ async def _analyze_with_llm(req: AnalyzeRequest) -> AnalyzeResponse:
     })
 
 
+def _safe_json_loads(raw):
+    """v26.3：解析存进 SQLite 的 JSON 字符串。空字符串/None/解析失败都安全返回 []。
+    用于 chunks 列的回读——不应让一条坏记录拖垮整个 GET 响应。
+    """
+    if not raw:
+        return []
+    if isinstance(raw, (list, dict)):
+        return raw
+    try:
+        v = json.loads(raw)
+        return v if isinstance(v, (list, dict)) else []
+    except (TypeError, ValueError):
+        return []
+
+
 def _load_project_text(pid: str) -> str:
     """v26.1：读取项目原文。导入大文本后分析/续跑都走这条路径；
     若项目从未导入原文 → 404。"""
@@ -909,6 +948,11 @@ def add_proj(p: ProjectIn):
 @app.delete("/api/projects/{pid}")
 def delete_proj(pid: str):
     """删除项目及其所有数据。Fix-3：兼容旧 hex ID 与新 22 字符 ID。"""
+    # v27: cancel running engine tasks first; FK CASCADE will clean tasks rows.
+    try:
+        task_engine.cancel_tasks_for_project(pid)
+    except Exception as _e:
+        print(f"warn: cancel_tasks_for_project({pid}) failed: {_e}", flush=True)
     conn = get_db()
     try:
         conn.execute("DELETE FROM projects WHERE id=?", (pid,))
@@ -1108,6 +1152,129 @@ def get_chunk_metas(pid: str, chunk_size: int = 500, chapter_from: int = 0, chap
         "chars": chars,
         "chunkMetas": metas,
     }
+
+
+# ==================== v26.3 项目失败切片（替换前端 localStorage）====================
+
+class ProjectFailureIn(BaseModel):
+    """v26.3：PUT /api/projects/{pid}/failure 入参。
+    chunks 是 [{chunkIndex, message, status?}] 数组（JSON 序列化）。
+    """
+    model_config = ConfigDict(extra="ignore")
+    chunkSize: int = Field(..., ge=1, le=20_000)
+    totalChunks: int = Field(0, ge=0, le=10_000_000)
+    chunks: List[Any] = Field(default_factory=list)
+    chapterFrom: str = Field("", max_length=200)
+    chapterTo: str = Field("", max_length=200)
+
+
+@app.get("/api/projects/{pid}/failure", response_model=dict)
+def get_project_failure(pid: str):
+    """v26.3：读失败记录。无记录 → 404。
+    不存在项目 → 404（FK 约束不会静默吞）。
+    """
+    conn = get_db()
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM projects WHERE id=?", (pid,)
+        ).fetchone()
+        if not exists:
+            raise HTTPException(status_code=404, detail={
+                "status": "error", "error": "project_not_found",
+                "message": f"项目 {pid!r} 不存在",
+            })
+        row = conn.execute(
+            "SELECT chunk_size, total_chunks, chunks, chapter_from, chapter_to, updated_at FROM project_failures WHERE project_id=?",
+            (pid,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail={
+            "status": "error", "error": "failure_not_found",
+            "message": f"项目 {pid!r} 无失败记录",
+        })
+    return {
+        "status": "success",
+        "projectId": pid,
+        "chunkSize": row['chunk_size'],
+        "totalChunks": row['total_chunks'],
+        "chunks": _safe_json_loads(row['chunks']),
+        "chapterFrom": row['chapter_from'] or '',
+        "chapterTo": row['chapter_to'] or '',
+        "updatedAt": row['updated_at'],
+    }
+
+
+@app.put("/api/projects/{pid}/failure", response_model=dict)
+def put_project_failure(pid: str, body: ProjectFailureIn):
+    """v26.3：upsert 失败记录。
+    - 不存在项目 → 404
+    - chunks 序列化为 JSON 后存
+    """
+    conn = get_db()
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM projects WHERE id=?", (pid,)
+        ).fetchone()
+        if not exists:
+            raise HTTPException(status_code=404, detail={
+                "status": "error", "error": "project_not_found",
+                "message": f"项目 {pid!r} 不存在",
+            })
+        now = int(time.time() * 1000)
+        chunks_json = json.dumps(body.chunks, ensure_ascii=False)
+        conn.execute(
+            """
+            INSERT INTO project_failures (project_id, chunk_size, total_chunks, chunks, chapter_from, chapter_to, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_id) DO UPDATE SET
+                chunk_size=excluded.chunk_size,
+                total_chunks=excluded.total_chunks,
+                chunks=excluded.chunks,
+                chapter_from=excluded.chapter_from,
+                chapter_to=excluded.chapter_to,
+                updated_at=excluded.updated_at
+            """,
+            (pid, body.chunkSize, body.totalChunks, chunks_json, body.chapterFrom, body.chapterTo, now)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {
+        "status": "success",
+        "projectId": pid,
+        "chunkSize": body.chunkSize,
+        "totalChunks": body.totalChunks,
+        "chunks": body.chunks,
+        "chapterFrom": body.chapterFrom,
+        "chapterTo": body.chapterTo,
+        "updatedAt": now,
+    }
+
+
+@app.delete("/api/projects/{pid}/failure")
+def delete_project_failure(pid: str):
+    """v26.3：清空失败记录。幂等——无记录也返回成功。
+    不存在项目 → 404（保持与其他 /failure 端点一致）。
+    """
+    conn = get_db()
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM projects WHERE id=?", (pid,)
+        ).fetchone()
+        if not exists:
+            raise HTTPException(status_code=404, detail={
+                "status": "error", "error": "project_not_found",
+                "message": f"项目 {pid!r} 不存在",
+            })
+        conn.execute(
+            "DELETE FROM project_failures WHERE project_id=?", (pid,)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "success", "projectId": pid, "deleted": True}
 
 
 @app.get("/api/projects/{pid}/chapters", response_model=dict)
@@ -1940,6 +2107,333 @@ def get_llm_model(model_id: str):
     if not model:
         raise HTTPException(status_code=404, detail={"error": "model_not_found"})
     return _model_row_to_out(model)
+
+
+# ==================== v27 后端任务引擎接口 ====================
+
+class TaskCreateIn(BaseModel):
+    """POST /api/projects/{pid}/tasks 入参。"""
+    model_config = ConfigDict(extra="ignore")
+    kind: str = Field("analyze", pattern="^(analyze|continue|retry)$")
+    chunk_size: int = Field(..., ge=1, le=20_000)
+    concurrency: int = Field(3, ge=1, le=8)
+    llm_model_id: str = Field(..., min_length=1, max_length=128)
+    system_prompt: str = Field("", max_length=20_000)
+    chapter_from: str = Field("", max_length=200)
+    chapter_to: str = Field("", max_length=200)
+    # continue / retry 用：续跑起点（retry 忽略——用失败索引）。
+    start_index: int = Field(0, ge=0, le=10_000_000)
+    # retry 用：原任务 chunkSize（用于 remap）。
+    old_chunk_size: int = Field(0, ge=0, le=20_000)
+    # retry 用：失败索引（remap 后落到新 chunkSize 下）。
+    failure_indexes: List[int] = Field(default_factory=list)
+
+
+def _project_text_or_404(pid: str) -> str:
+    """Load project_text or 404. Caller responsible for closing."""
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT text FROM project_text WHERE project_id=?", (pid,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail={
+            "status": "error", "error": "project_text_not_found",
+            "message": f"project {pid!r} has no imported text; PUT /api/projects/{{pid}}/text first",
+        })
+    return row["text"]
+
+
+def _llm_model_name_or_empty(model_id: str) -> str:
+    try:
+        cfg = _lookup_llm_model(model_id)
+        return cfg.get("name", "")
+    except Exception:
+        return ""
+
+
+def _task_row_to_dict(row):
+    if row is None:
+        return None
+    d = dict(row)
+    failed = _safe_json_loads(d.get("failed_indexes") or "[]")
+    d["failedIndexes"] = list(failed) if isinstance(failed, list) else []
+    d["chapterFrom"] = d.get("chapter_from") or ""
+    d["chapterTo"] = d.get("chapter_to") or ""
+    d["llmModelId"] = d.get("llm_model_id") or ""
+    d["modelName"] = d.get("model_name") or ""
+    d["systemPrompt"] = d.get("system_prompt") or ""
+    d["rateLimitCount"] = d.get("rate_limit_count", 0)
+    d["degraded"] = bool(d.get("degraded", 0))
+    d["projectId"] = d.get("project_id")
+    d["taskId"] = d.get("id")
+    d["kind"] = d.get("kind")
+    d["status"] = d.get("status")
+    d["chunkSize"] = d.get("chunk_size")
+    d["concurrency"] = d.get("concurrency")
+    d["totalChunks"] = d.get("total_chunks")
+    d["completed"] = d.get("completed", 0)
+    d["successCount"] = d.get("success_count", 0)
+    d["failedCount"] = d.get("failed_count", 0)
+    d["lastCompleted"] = d.get("last_completed", 0)
+    d["createdAt"] = d.get("created_at")
+    d["updatedAt"] = d.get("updated_at")
+    d["startedAt"] = d.get("started_at")
+    d["finishedAt"] = d.get("finished_at")
+    d["error"] = d.get("error") or ""
+    return d
+
+
+def _ensure_project_exists(pid: str):
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT 1 FROM projects WHERE id=?", (pid,)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail={
+            "status": "error", "error": "project_not_found",
+            "message": f"project {pid!r} not found",
+        })
+
+
+@app.post("/api/projects/{pid}/tasks", response_model=dict)
+async def create_task_endpoint(pid: str, body: TaskCreateIn):
+    """Create a new analysis task and launch the engine.
+
+    409 if any task in queued/running/paused exists for the project.
+    """
+    _ensure_project_exists(pid)
+
+    # 409: existing active task for this project.
+    conn = get_db()
+    try:
+        existing = conn.execute(
+            "SELECT id, status FROM tasks WHERE project_id=? "
+            "AND status IN ('queued','running','paused') LIMIT 1",
+            (pid,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if existing:
+        raise HTTPException(status_code=409, detail={
+            "status": "error", "error": "task_already_active",
+            "taskId": existing["id"],
+            "message": f"project {pid!r} already has an active task",
+        })
+
+    # Load project text (404 if missing).
+    project_text = _project_text_or_404(pid)
+
+    # Load LLM model config (validate up front).
+    try:
+        _lookup_llm_model(body.llm_model_id)
+    except HTTPException:
+        raise
+
+    # Compute chunk metas.
+    ranges = _detect_chapter_ranges(project_text)
+    chunk_size = body.chunk_size
+    chars = len(project_text)
+    total_chunks = (chars + chunk_size - 1) // chunk_size
+    chunk_indexes = list(range(total_chunks))
+    chapter_from_i = int(body.chapter_from) if body.chapter_from else 0
+    chapter_to_i = int(body.chapter_to) if body.chapter_to else 0
+
+    if chapter_from_i or chapter_to_i:
+        filtered = []
+        for idx in chunk_indexes:
+            ci = _compute_chunk_index_by_chapter(ranges, idx * chunk_size, chapter_from_i, chapter_to_i)
+            if chapter_from_i and ci and ci < chapter_from_i:
+                continue
+            if chapter_to_i and ci and ci > chapter_to_i:
+                continue
+            filtered.append(idx)
+        chunk_indexes = filtered
+
+    # Build task row.
+    task_id = task_engine.new_task_id()
+    now = task_engine.now_iso()
+    start_index = 0
+    retry_remapped = None
+    kind = body.kind
+
+    if kind == "retry":
+        old_size = body.old_chunk_size or chunk_size
+        if not body.failure_indexes:
+            raise HTTPException(status_code=400, detail={
+                "status": "error", "error": "missing_failure_indexes",
+                "message": "retry requires failure_indexes",
+            })
+        # remap and intersect with available chunk_indexes
+        remapped = task_engine.remap_indexes(body.failure_indexes, old_size, chunk_size)
+        available = set(chunk_indexes)
+        retry_remapped = [i for i in remapped if i in available]
+        if not retry_remapped:
+            raise HTTPException(status_code=400, detail={
+                "status": "error", "error": "no_matching_chunks",
+                "message": "retry indexes do not match any current chunk",
+            })
+        total_for_task = len(retry_remapped)
+    elif kind == "continue":
+        start_index = body.start_index
+        if start_index >= len(chunk_indexes):
+            raise HTTPException(status_code=400, detail={
+                "status": "error", "error": "no_remaining",
+                "message": "no remaining chunks to continue",
+            })
+        total_for_task = len(chunk_indexes) - start_index
+    else:  # analyze
+        total_for_task = len(chunk_indexes)
+
+    model_name = _llm_model_name_or_empty(body.llm_model_id)
+
+    conn = get_db()
+    try:
+        conn.execute(
+            """INSERT INTO tasks (
+                id, project_id, kind, status,
+                chunk_size, concurrency, total_chunks,
+                completed, success_count, failed_count,
+                failed_indexes, last_completed,
+                chapter_from, chapter_to,
+                llm_model_id, system_prompt, model_name,
+                error, rate_limit_count, degraded,
+                created_at, updated_at, started_at, finished_at
+            ) VALUES (
+                ?, ?, ?, 'queued',
+                ?, ?, ?,
+                0, 0, 0,
+                '[]', ?,
+                ?, ?,
+                ?, ?, ?,
+                '', 0, 0,
+                ?, ?, NULL, NULL
+            )""",
+            (
+                task_id, pid, kind,
+                chunk_size, body.concurrency, total_for_task,
+                start_index,
+                body.chapter_from or "", body.chapter_to or "",
+                body.llm_model_id, body.system_prompt or "", model_name,
+                now, now,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Register runner.
+    runner = task_engine.RunnerState(
+        task_id=task_id,
+        project_id=pid,
+        concurrency=body.concurrency,
+        effective_concurrency=body.concurrency,
+    )
+    task_engine.RUNNERS[task_id] = runner
+
+    # Spawn the runner coroutine on the event loop.
+    runner.asyncio_task = task_engine.submit_run_task(
+        task_id=task_id,
+        pid=pid,
+        kind=kind,
+        chunk_size=chunk_size,
+        concurrency=body.concurrency,
+        llm_model_id=body.llm_model_id,
+        system_prompt=body.system_prompt or "",
+        model_name=model_name,
+        chapter_from=body.chapter_from or "",
+        chapter_to=body.chapter_to or "",
+        total_chunks=len(chunk_indexes),
+        chunk_indexes=chunk_indexes,
+        project_text=project_text,
+        ranges=ranges,
+        start_index=start_index,
+        retry_remapped=retry_remapped,
+    )
+
+    return {"status": "success", "taskId": task_id, "totalChunks": total_for_task}
+
+
+@app.get("/api/projects/{pid}/tasks", response_model=dict)
+def list_tasks_endpoint(pid: str):
+    """List all tasks for a project (light: no full text)."""
+    _ensure_project_exists(pid)
+    rows = task_engine.list_tasks_for_project(pid)
+    items = [_task_row_to_dict(r) for r in rows]
+    return {"status": "success", "projectId": pid, "tasks": items}
+
+
+class TaskPatchIn(BaseModel):
+    """PATCH /api/projects/{pid}/tasks/{tid} 入参。"""
+    model_config = ConfigDict(extra="ignore")
+    action: str = Field(..., pattern="^(pause|resume|cancel|set_concurrency)$")
+    concurrency: int = Field(0, ge=0, le=8)
+
+
+@app.patch("/api/projects/{pid}/tasks/{tid}", response_model=dict)
+def patch_task_endpoint(pid: str, tid: str, body: TaskPatchIn):
+    """Action dispatcher: pause|resume|cancel|set_concurrency."""
+    _ensure_project_exists(pid)
+    row = task_engine.fetch_task_row(tid)
+    if not row:
+        raise HTTPException(status_code=404, detail={
+            "status": "error", "error": "task_not_found",
+            "message": f"task {tid!r} not found",
+        })
+    if row["project_id"] != pid:
+        raise HTTPException(status_code=404, detail={
+            "status": "error", "error": "task_project_mismatch",
+            "message": f"task {tid!r} does not belong to project {pid!r}",
+        })
+
+    action = body.action
+    if action == "pause":
+        ok = task_engine.pause_task(tid)
+    elif action == "resume":
+        ok = task_engine.resume_task(tid)
+    elif action == "cancel":
+        ok = task_engine.cancel_task(tid)
+    elif action == "set_concurrency":
+        ok = task_engine.set_task_concurrency(tid, body.concurrency)
+    else:
+        ok = False
+
+    if not ok:
+        raise HTTPException(status_code=409, detail={
+            "status": "error", "error": "action_not_allowed",
+            "message": f"action {action!r} not allowed in current task state",
+        })
+    return {"status": "success", "taskId": tid, "action": action}
+
+
+@app.delete("/api/projects/{pid}/tasks/{tid}", response_model=dict)
+def delete_task_endpoint(pid: str, tid: str):
+    """Cancel + delete a task row."""
+    _ensure_project_exists(pid)
+    row = task_engine.fetch_task_row(tid)
+    if not row:
+        raise HTTPException(status_code=404, detail={
+            "status": "error", "error": "task_not_found",
+            "message": f"task {tid!r} not found",
+        })
+    if row["project_id"] != pid:
+        raise HTTPException(status_code=404, detail={
+            "status": "error", "error": "task_project_mismatch",
+            "message": f"task {tid!r} does not belong to project {pid!r}",
+        })
+
+    # If still active, cancel first.
+    task_engine.cancel_task(tid)
+    conn = get_db()
+    try:
+        conn.execute("DELETE FROM tasks WHERE id=?", (tid,))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "success", "taskId": tid}
 
 
 if __name__ == "__main__":

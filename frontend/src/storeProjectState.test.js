@@ -150,6 +150,10 @@ test('creating a project clears a stale load error and automatically selects it'
     if (url.endsWith('/projects/13/data')) {
       return projectData.promise;
     }
+    // v26.3-fix: selectProject now also fetches /failure (backend failureStore). Return 404 so getFailure resolves to null.
+    if (url.includes('/projects/') && url.endsWith('/failure')) {
+      return { ok: false, status: 404, json: async () => ({}) };
+    }
     throw new Error(`Unexpected fetch: ${url}`);
   };
 

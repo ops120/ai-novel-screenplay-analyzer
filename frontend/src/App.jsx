@@ -24,7 +24,6 @@ import { detectChapterRanges } from './chapterSplitter.js';
 import { filterChapters } from './chapterSearch.js';
 import { buildTaskGuide } from './taskGuide.js';
 import { listProgress } from './progressStore.js';
-import { restoreInterruptedTasks } from './taskManager.js';
 
 // ==================== 主题配置 ====================
 const THEMES = [
@@ -179,13 +178,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    s.fetchProjects();
+    s.fetchProjects().then(() => s.refreshTasksNow()).catch(() => {});
     s.fetchLlmModels();
-    listProgress().then(entries => {
-      if (entries?.length) {
-        restoreInterruptedTasks(entries);
-      }
-    }).catch(() => {});
+    // v28: 后端引擎在 boot 时暂停 task 状态\uff1bApp 启动 store 的后端 task 轮询。
+    s.startBackendTaskPolling();
+    return () => s.stopBackendTaskPolling();
   }, []);
 
   // 主题

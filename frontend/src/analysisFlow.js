@@ -70,9 +70,17 @@ export async function runAnalyzesInParallel({
   signal,
   paused = false,   // v20：初始暂停态（续跑时先暂停等用户「继续」）
   isPaused = () => false,  // v20：外部暂停查询器（刷新时恢复暂停态）
+  getMaxConcurrency = null,  // v27：返回当前最大并发上限（UI 可调）。缺看并发。
 }) {
   const total = chunks.length;
   const initialConcurrency = clampConcurrency(concurrency);
+  // v27-fix: 降级（连续 RATE_LIMIT_WINDOW 次 429/503）一旦触发，池子上限永久降到 MIN_CONCURRENCY。
+  // 之前只置 currentConcurrency=1 / degraded=true，但 maintain() 的上限只读 getMaxConcurrency()，
+  // 降级状态从未生效。新任务才允许回升。
+  const resolveBaseMax = typeof getMaxConcurrency === 'function'
+    ? () => clampConcurrency(getMaxConcurrency())
+    : () => initialConcurrency;
+  const resolveMaxConcurrency = () => (degraded ? MIN_CONCURRENCY : resolveBaseMax());
   const results = new Array(total);
   const failedIndexes = [];
   let currentConcurrency = initialConcurrency;
@@ -160,6 +168,8 @@ export async function runAnalyzesInParallel({
     }
     completed += 1;
     fireProgress();
+    // v27: 每片完成后补充池——并发上限变动可立刻生效
+    maintain();
   };
 
   const worker = async () => {
@@ -173,6 +183,10 @@ export async function runAnalyzesInParallel({
         ]);
         continue;
       }
+      // v27-fix: 降级后池子上限降低时，已在飞的 worker 也要退出，腾出槽位。
+      // JS 单线程下逐个 continuation 顺序执行，本检查-退出不会有「两个 worker 同时留在」的问题：
+      // 它们各自独立 await runOne()，finally 里 active -= 1 串行执行。
+      if (active > resolveMaxConcurrency()) return;
       const item = takeNext();
       if (item === null) return;
       try {
@@ -195,15 +209,41 @@ export async function runAnalyzesInParallel({
     }
   };
 
-  // 第一波：起 currentConcurrency 个 worker
-  const initialWave = [];
-  for (let i = 0; i < currentConcurrency; i += 1) initialWave.push(worker());
-  await Promise.all(initialWave);
+  // v27：自平衡 worker 池。每个 worker 完成后看是否还能再起一个，上限读 resolveMaxConcurrency()。
+  // 这样 UI 调并发会实时生效（增加时补孔位，减少时新 worker 不再起动）。
+  const workerPromises = [];
+  let active = 0;
+  // v27 活跃个数变动通知：worker 退出后立即唤醒等待循环
+  let activeWakeResolve = null;
+  const wakeActive = () => {
+    if (activeWakeResolve) {
+      const r = activeWakeResolve;
+      activeWakeResolve = null;
+      r();
+    }
+  };
+  const maintain = () => {
+    while (
+      active < resolveMaxConcurrency() &&
+      nextIndex < queue.length &&
+      !isAborted() &&
+      !shouldPause()
+    ) {
+      active += 1;
+      workerPromises.push(
+        worker().finally(() => {
+          active -= 1;
+          // worker 退出后再补一次池（UI 加并发也能立刻被哺上）
+          maintain();
+          wakeActive();
+        })
+      );
+    }
+  };
+  maintain();
 
-  // 降级后剩余任务（如果降级发生在第一波完成前，第一波 worker 用的就是降级前的并发度）
-  // —— 重新检查队列，剩余切片单线程补完。
-  // v20：暂停时这里也等待，不把剩余切片标成「未执行」。
-  if (!isAborted() && nextIndex < queue.length) {
+  // 暂停 / abort 期间仍保持轮询：原 followup 循环的能力。
+  if (!isAborted()) {
     while (nextIndex < queue.length) {
       if (isAborted()) break;
       if (shouldPause()) {
@@ -212,27 +252,27 @@ export async function runAnalyzesInParallel({
           new Promise((r) => setTimeout(r, 300)),
           ...(signal ? [new Promise((r) => signal.addEventListener('abort', r, { once: true }))] : []),
         ]);
+        maintain();
         continue;
       }
-      const item = queue[nextIndex];
-      nextIndex += 1;
-      try {
-        const result = await runOne(item.chunk, item.index, signal);
-        handleResult(item.index, result);
-      } catch (err) {
-        if (err && err.name === 'AbortError') {
-          results[item.index] = { ok: false, message: '已取消' };
-          failedIndexes.push(item.index);
-          completed += 1;
-          fireProgress();
-          break;
-        }
-        results[item.index] = { ok: false, message: err && err.message ? err.message : String(err) };
-        failedIndexes.push(item.index);
-        completed += 1;
-        fireProgress();
-      }
+      break;
     }
+  }
+
+  // v27 修复：不要用 Promise.all(workerPromises)，它只等位于调用时的数组。
+  // 后面 maintain() 在 handleResult 里新 spawn 的 worker 不会被等到。
+  // 改为按 active 计数轮询等待：所有 worker 都退出后再进行后处。
+  while (active > 0) {
+    if (isAborted()) break;
+    await new Promise((r) => {
+      activeWakeResolve = r;
+      setTimeout(() => {
+        if (activeWakeResolve === r) {
+          activeWakeResolve = null;
+          r();
+        }
+      }, 30);
+    });
   }
 
   // 任何未填充的槽位（被取消 / 队列空）补上占位

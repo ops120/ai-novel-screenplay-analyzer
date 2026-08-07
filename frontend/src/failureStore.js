@@ -1,141 +1,85 @@
-// v18：失败切片元数据持久化。
+// v26.3：失败切片记录持久化迁移到后端 SQLite。
 //
-// 用户跑完一次分析后，失败的切片元数据写到 localStorage，UI 上点「重试」即可
-// 只重跑那几片而不用从头跑。
+// 历史：v18-v26.2 用浏览器 localStorage（5MB 配额对长篇不够），
+// key='storymap_analyze_failures', TTL 7 天。
 //
-// 设计要点：
-//   1. 失败列表按 projectId 分组，避免项目间串扰
-//   2. 原文也存（base64）—— 重试时要按 chunkIndex × chunkSize 切出对应切片
-//   3. TTL 7 天 —— 超过自动清理（老失败列表很可能文本已变）
-//   4. 体积估算：原文 max 200KB → base64 后约 270KB；5MB localStorage 够
-//   5. 失败列表不存密码 / api_key，只存公开元数据
+// 现在：
+//   - 全部走 fetch + 本地 FastAPI（/api/projects/{pid}/failure），无 localStorage 依赖。
+//   - saveFailure 走 PUT（upsert），getFailure 走 GET，clearFailure 走 DELETE（幂等）。
+//   - 返回值统一 Promise；HTTP 错误抛错让调用方知晓。
+//   - listFailures 不再提供（历史仅测试用，无调用方）。
+//
+// 老 localStorage 数据不再迁移，作废——后端返回 404 时视为「无失败记录」。
 
-const STORAGE_KEY = 'storymap_analyze_failures';
-const TTL_MS = 7 * 24 * 60 * 60 * 1000;
+import { API_BASE } from './config.js';
 
-function safeLocalStorage() {
-  try {
-    return globalThis.localStorage;
-  } catch {
-    return undefined;
-  }
+function endpoint(projectId) {
+  const pid = encodeURIComponent(String(projectId ?? ''));
+  return `${API_BASE}/projects/${pid}/failure`;
 }
 
-function readAll() {
-  const storage = safeLocalStorage();
-  if (!storage) return {};
-  const raw = storage.getItem(STORAGE_KEY);
-  if (!raw) return {};
-  try {
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function writeAll(data) {
-  const storage = safeLocalStorage();
-  if (!storage) return;
-  try {
-    storage.setItem(STORAGE_KEY, JSON.stringify(data));
-  } catch (e) {
-    // QuotaExceededError 之类 —— 不阻塞主流程
-    console.warn('失败列表持久化失败', e);
-  }
-}
-
-// 清理过期的失败记录。返回清理后的全集。
-function purgeExpired(all) {
-  const now = Date.now();
-  const kept = {};
-  for (const [pid, entry] of Object.entries(all)) {
-    if (entry && typeof entry.timestamp === 'number' && now - entry.timestamp < TTL_MS) {
-      kept[pid] = entry;
+async function readJsonOrThrow(res) {
+  if (!res.ok) {
+    let detail = '';
+    try {
+      detail = JSON.stringify(await res.json());
+    } catch {
+      // 忽略：404 detail 不一定有 body
     }
+    throw new Error(`HTTP ${res.status} ${res.statusText || ''} ${detail}`.trim());
   }
-  return kept;
+  return res.json();
 }
 
 /**
- * 保存某项目本次分析的失败切片列表。
+ * 保存失败切片记录（upsert）。
  * @param {string} projectId
  * @param {object} payload
- *   - chunks: Array<{chunkIndex, message, status?}>
- *   - totalChunks: number
- *   - text: string                原文
  *   - chunkSize: number
- *   - concurrency: number
- *   - llmModelName: string        提示用，不参与重试逻辑
- *   - chapterFrom: number | ''    v20.4.2：保存本次范围，重试时按同一范围过滤
- *   - chapterTo:   number | ''
+ *   - totalChunks: number
+ *   - chunks: Array<{chunkIndex, message, status?}>
+ *   - chapterFrom: string
+ *   - chapterTo: string
+ * @returns {Promise<object>} 后端响应
  */
-export function saveFailure(projectId, payload) {
-  if (!projectId) return;
-  const all = purgeExpired(readAll());
-  all[projectId] = {
-    timestamp: Date.now(),
-    totalChunks: payload.totalChunks,
-    chunks: payload.chunks || [],
-    text: encodeTextForStorage(payload.text || ''),
-    chunkSize: payload.chunkSize,
-    concurrency: payload.concurrency,
-    llmModelName: payload.llmModelName || '',
+export async function saveFailure(projectId, payload) {
+  if (!projectId) throw new Error('saveFailure: projectId 必填');
+  const body = {
+    chunkSize: payload.chunkSize || 0,
+    totalChunks: payload.totalChunks || 0,
+    chunks: Array.isArray(payload.chunks) ? payload.chunks : [],
     chapterFrom: payload.chapterFrom || '',
     chapterTo: payload.chapterTo || '',
   };
-  writeAll(all);
+  const res = await fetch(endpoint(projectId), {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return readJsonOrThrow(res);
 }
 
-export function getFailure(projectId) {
+/**
+ * 读失败记录。无记录时返回 null（与历史 localStorage 版兼容：调用方习惯 null 当作「无」）。
+ * @returns {Promise<object|null>}
+ */
+export async function getFailure(projectId) {
   if (!projectId) return null;
-  const all = purgeExpired(readAll());
-  const entry = all[projectId];
-  if (!entry) return null;
-  // v20.4.2：返回时解码 text，并补全 chapterFrom/To 字段（老记录无此字段）
-  return {
-    ...entry,
-    text: decodeTextFromStorage(entry.text),
-    chapterFrom: entry.chapterFrom || '',
-    chapterTo: entry.chapterTo || '',
-  };
+  const res = await fetch(endpoint(projectId));
+  if (res.status === 404) return null;
+  return readJsonOrThrow(res);
 }
 
-export function clearFailure(projectId) {
+/**
+ * 清空失败记录。幂等——无记录也返回成功。
+ * 不存在项目 → 404 抛错（与后端契约一致）。
+ */
+export async function clearFailure(projectId) {
   if (!projectId) return;
-  const all = purgeExpired(readAll());
-  delete all[projectId];
-  writeAll(all);
-}
-
-export function listFailures() {
-  const all = purgeExpired(readAll());
-  return Object.entries(all).map(([projectId, entry]) => ({ projectId, ...entry }));
-}
-
-// ==================== 文本编解码 ====================
-// TextEncoder 输出 Uint8Array；转成 latin1 字符串可走 btoa，绕开非 ASCII 抛错。
-function encodeTextForStorage(text) {
-  try {
-    const bytes = new TextEncoder().encode(text);
-    let bin = '';
-    for (let i = 0; i < bytes.length; i += 1) bin += String.fromCharCode(bytes[i]);
-    return btoa(bin);
-  } catch (e) {
-    console.warn('encodeTextForStorage 失败', e);
-    return '';
+  const res = await fetch(endpoint(projectId), { method: 'DELETE' });
+  if (res.status === 404) {
+    // 项目不存在：视为幂等成功（与原 localStorage 行为一致——不存在就是清掉了）。
+    return { status: 'success', projectId, deleted: true };
   }
-}
-
-export function decodeTextFromStorage(encoded) {
-  if (typeof encoded !== 'string' || !encoded) return '';
-  try {
-    const bin = atob(encoded);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
-    return new TextDecoder('utf-8').decode(bytes);
-  } catch (e) {
-    console.warn('decodeTextFromStorage 失败', e);
-    return '';
-  }
+  return readJsonOrThrow(res);
 }

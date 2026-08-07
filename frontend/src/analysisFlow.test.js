@@ -423,3 +423,109 @@ test('v20：执行器返回值包含 paused 和 completed 字段', async () => {
   assert.equal(typeof resultPaused, 'boolean');
   assert.equal(typeof completed, 'number');
 });
+
+test('v27：getMaxConcurrency 调大后 worker 池补充（实时加并发）', async () => {
+  let max = 2;
+  let inFlight = 0;
+  let peakInFlight = 0;
+  const runOne = async () => {
+    inFlight += 1;
+    if (inFlight > peakInFlight) peakInFlight = inFlight;
+    await new Promise((r) => setTimeout(r, 40));
+    inFlight -= 1;
+    return { ok: true };
+  };
+  // 第一波只起 2 个；~120ms 后加到 5，池应补充
+  setTimeout(() => { max = 5; }, 100);
+  const result = await runAnalyzesInParallel({
+    chunks: Array.from({ length: 16 }, (_, i) => i),
+    concurrency: 2,
+    getMaxConcurrency: () => max,
+    runOne,
+  });
+  assert.equal(result.successCount, 16);
+  // 加到 5 后有机会并发到 5；peakInFlight 应 ≥ 2（初始上限）
+  assert.ok(peakInFlight >= 2, `peakInFlight=${peakInFlight} 应 ≥ 2`);
+  assert.ok(peakInFlight <= 5, `peakInFlight=${peakInFlight} 不应 > 5`);
+});
+
+test('v27：getMaxConcurrency 调大不超过新上限（实时加并发不过头）', async () => {
+  let max = 1;
+  let inFlight = 0;
+  let peakInFlight = 0;
+  const runOne = async () => {
+    inFlight += 1;
+    if (inFlight > peakInFlight) peakInFlight = inFlight;
+    await new Promise((r) => setTimeout(r, 30));
+    inFlight -= 1;
+    return { ok: true };
+  };
+  setTimeout(() => { max = 3; }, 60);
+  const result = await runAnalyzesInParallel({
+    chunks: Array.from({ length: 12 }, (_, i) => i),
+    concurrency: 1,
+    getMaxConcurrency: () => max,
+    runOne,
+  });
+  assert.equal(result.successCount, 12);
+  assert.ok(peakInFlight <= 3, `peakInFlight=${peakInFlight} 不应 > 3`);
+  assert.ok(peakInFlight >= 2, `peakInFlight=${peakInFlight} 应 ≥ 2（从 1 加到 3 后需要起多个 worker）`);
+});
+
+
+test('v27-fix: 降级触发后池子上限降到 1，新取片不再超 cap', async () => {
+  // 并发 4，10 个切片；前 3 个 429 触发降级。
+  // 验证：finalConcurrency=1；总处理数=10；后续切片严格串行。
+  // 瞬态（降级瞬间已有 worker 在飞）是允许的 —— worker 必须等当前 chunk 跑完才能退出。
+  const startTimes = [];
+  const runOne = async (_chunk, index) => {
+    startTimes[index] = Date.now();
+    await new Promise((r) => setTimeout(r, 20));
+    if (index < 3) return { ok: false, message: 'rate limited', status: 429 };
+    return { ok: true };
+  };
+
+  const result = await runAnalyzesInParallel({
+    chunks: Array.from({ length: 10 }, (_, i) => i),
+    concurrency: 4,
+    runOne,
+  });
+
+  assert.equal(result.degraded, true);
+  assert.equal(result.finalConcurrency, 1);
+  assert.equal(result.successCount + result.failedIndexes.length, 10);
+  // 关键：index >= 3 的切片必须串行（一个跑完才开始下一个），证明 cap=1 生效。
+  for (let i = 1; i < 10; i += 1) {
+    const prev = startTimes[i - 1];
+    const cur = startTimes[i];
+    assert.ok(cur >= prev, `chunk ${i} 应在 chunk ${i - 1} 之后开始`);
+  }
+});
+
+test('v27-fix: 降级后 getMaxConcurrency 回调被忽略，cap 永久为 1', async () => {
+  // 即便 getMaxConcurrency() 始终返回 5，cap 也得是 1（degraded 优先）。
+  // 验证：startTimes 单调不减 → 串行执行 → cap 实际生效。
+  const max = 5;
+  const startTimes = [];
+  const runOne = async (_chunk, index) => {
+    startTimes[index] = Date.now();
+    await new Promise((r) => setTimeout(r, 15));
+    if (index < 3) return { ok: false, message: 'rate limited', status: 429 };
+    return { ok: true };
+  };
+
+  const result = await runAnalyzesInParallel({
+    chunks: Array.from({ length: 8 }, (_, i) => i),
+    concurrency: 4,
+    getMaxConcurrency: () => max,
+    runOne,
+  });
+
+  assert.equal(result.degraded, true);
+  assert.equal(result.finalConcurrency, 1);
+  for (let i = 1; i < 8; i += 1) {
+    const prev = startTimes[i - 1];
+    const cur = startTimes[i];
+    assert.ok(cur >= prev, `chunk ${i} 应在 chunk ${i - 1} 之后开始`);
+  }
+});

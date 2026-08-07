@@ -195,6 +195,25 @@ async function fetchChunkMetas(projectId, chunkSize, chapterFrom, chapterTo) {
   };
 }
 
+// v26.3：旧 chunkIndex 集 → 新 chunkSize 下的 chunkIndex 集（按字符偏移重算）。
+// 旧切片 i 覆盖区间 [i*old, (i+1)*old)；与新区间 [j*new, (j+1)*new) 重叠时 j 被纳入。
+// from = floor(i*old / new)；to = floor(((i+1)*old - 1) / new)；to >= from 恒成立。
+// 用途：用户改 chunkSize 重试时把旧失败索引迁移到新坐标，再与 chunk-metas 匹配。
+export function remapFailureIndexes(oldIndexes, oldChunkSize, newChunkSize) {
+  if (!Array.isArray(oldIndexes) || oldIndexes.length === 0) return [];
+  if (!Number.isFinite(oldChunkSize) || oldChunkSize <= 0) return [];
+  if (!Number.isFinite(newChunkSize) || newChunkSize <= 0) return [];
+  const set = new Set();
+  for (const idx of oldIndexes) {
+    if (!Number.isFinite(idx) || idx < 0) continue;
+    const from = Math.floor((idx * oldChunkSize) / newChunkSize);
+    let to = Math.floor(((idx + 1) * oldChunkSize - 1) / newChunkSize);
+    if (to < from) to = from;
+    for (let j = from; j <= to; j += 1) set.add(j);
+  }
+  return Array.from(set).sort((a, b) => a - b);
+}
+
 function buildChunks(text, chunkSize, chapterFrom, chapterTo) {
   // v26.2：text 为空或 null 时不再生成 chunk（前端无原文，调用方走 fetchChunkMetas 拿元数据）。
   if (text == null || text === '') return [];
@@ -344,6 +363,8 @@ async function executeTask(task) {
       signal: task.abortController.signal,
       isPaused: () => task.isPaused,
       paused: task.isPaused,
+      // v27: UI 实时调并发上限。task.concurrency 可被 updateTaskParams 改写
+      getMaxConcurrency: () => clampConcurrency(task.concurrency ?? concurrency),
     });
 
     // 收集失败切片（retry 任务用全局 chunkIndex；continue 同 analyze；analyze 同 chunkIndex）
@@ -382,16 +403,25 @@ async function executeTask(task) {
     // 失败切片落 failureStore（v18 兼容：只有 analyze / retry 写）
     // v26.2：大文本模式不存 text（前端无原文；retry 时走 chunk-metas）。
     if (task.kind !== 'continue' && failed.length > 0) {
-      saveFailure(projectId, {
-        totalChunks: task.overallTotal,
-        chunks: failed,
-        text: task.text || '',
-        chunkSize,
-        chapterFrom: task.chapterFrom || '',
-        chapterTo: task.chapterTo || '',
-      });
+      // v26.3：failureStore 改 async；不存 text（后端不需要原文）。
+      try {
+        await saveFailure(projectId, {
+          totalChunks: task.overallTotal,
+          chunks: failed,
+          text: task.text || '',
+          chunkSize,
+          chapterFrom: task.chapterFrom || '',
+          chapterTo: task.chapterTo || '',
+        });
+      } catch (err) {
+        console.warn('saveFailure 失败', err);
+      }
     } else if (failed.length === 0) {
-      clearFailure(projectId);
+      try {
+        await clearFailure(projectId);
+      } catch (err) {
+        console.warn('clearFailure 失败', err);
+      }
     }
 
     updateTask(task, {
@@ -513,11 +543,30 @@ export async function createContinueTask(opts) {
 
   const { progress } = opts;
   if (!progress || !progress.active || progress.lastCompleted >= progress.totalChunks) return null;
-  const text = progress.text || '';
-  const start = progress.lastCompleted;
-  const chunkSize = progress.chunkSize;
+
+  // v27-fix: opts.chunkSize/concurrency 覆盖 progress 值；undefined / 非法值回落。
+  const overrideChunkSize = Number.isFinite(opts.chunkSize) && opts.chunkSize > 0 ? opts.chunkSize : null;
+  const overrideConcurrency = Number.isFinite(opts.concurrency) && opts.concurrency > 0
+    ? clampConcurrency(opts.concurrency) : null;
+  const progressChunkSize = progress.chunkSize;
+  const chunkSize = overrideChunkSize != null ? overrideChunkSize : progressChunkSize;
+  const concurrency = overrideConcurrency != null ? overrideConcurrency : progress.concurrency;
   const chapterFrom = progress.chapterFrom;
   const chapterTo = progress.chapterTo;
+
+  // v27-fix: chunkSize 变化时按字符偏移重算续跑起点。
+  // 旧切片起点 = lastCompleted * 旧 chunkSize，新起点 = floor(旧字符偏移 / 新 chunkSize)。
+  // remapFailureIndexes 给出新索引集，取首个作为 startIndex。
+  const sizeChanged = overrideChunkSize != null
+    && Number.isFinite(progressChunkSize) && progressChunkSize > 0
+    && progressChunkSize !== chunkSize;
+  let start = progress.lastCompleted;
+  if (sizeChanged) {
+    const remapped = remapFailureIndexes([progress.lastCompleted], progressChunkSize, chunkSize);
+    start = remapped.length > 0 ? remapped[0] : start;
+  }
+
+  const text = progress.text || '';
 
   let chunkMetas = [];
   let overallTotal = 0;
@@ -548,7 +597,8 @@ export async function createContinueTask(opts) {
     projectId: opts.projectId,
     projectName: opts.projectName || '',
     modelName: opts.modelName,
-    concurrency: progress.concurrency,
+    // v27-fix: 覆盖后的并发（卡片编辑优先；未传回落 progress）
+    concurrency,
     chapterFrom: chapterFrom,
     chapterTo: chapterTo,
     total: remainingMetas.length,
@@ -557,6 +607,7 @@ export async function createContinueTask(opts) {
   task.text = text || null;
   task.modelId = opts.modelId;
   task.systemPrompt = opts.systemPrompt;
+  // v27-fix: 覆盖后的分片大小（卡片编辑优先）
   task.chunkSize = chunkSize;
   task.chunkMetas = chunkMetas;
   task.chunks = text ? remainingMetas.map((c) => c.text) : new Array(remainingMetas.length).fill(null);
@@ -585,10 +636,19 @@ export async function createRetryFailedTask(opts) {
   if (!opts || !opts.projectId) return null;
   if (hasActiveTaskForProject(opts.projectId)) return null;
 
-  const failure = getFailure(opts.projectId);
+  // v26.3：failureStore 改 async，后端 GET（localStorage 数据已作废，不再读）。
+  const failure = await getFailure(opts.projectId);
   if (!failure || failure.chunks.length === 0) return null;
-  const text = failure.text || '';
-  const chunkSize = opts.chunkSize || failure.chunkSize;
+  // failure 已不含 text（后端不存原文）。重试时 chunkSize 默认走失败时的值，
+  // 用户改新值时 remap 旧索引到新坐标。
+  const failureChunkSize = failure.chunkSize;
+  const newChunkSize = Number.isFinite(opts.chunkSize) && opts.chunkSize > 0
+    ? opts.chunkSize : failureChunkSize;
+  const sizeChanged = Number.isFinite(failureChunkSize) && failureChunkSize > 0
+    && failureChunkSize !== newChunkSize;
+  // 大文本模式：failure.text 不存在，本地拿不到原文——只能走 chunk-metas。
+  const text = '';
+  const chunkSize = newChunkSize;
 
   let chunkMetas = [];
   let overallTotal = failure.totalChunks || 0;
@@ -608,9 +668,22 @@ export async function createRetryFailedTask(opts) {
   } finally {
     pendingProjectIds.delete(opts.projectId);
   }
-  const targets = failure.chunks
-    .map((c) => ({ failure: c, meta: chunkMetas.find((m) => m.chunkIndex === c.chunkIndex) }))
-    .filter((t) => t.meta);
+  // v26.3：按用户当前 chunkSize 重映射失败索引。
+  // sizeChanged 时旧索引 i 可能跨越多个新切片（newChunkSize < failureChunkSize 时展开）。
+  // 同大小时直接精确匹配，避免无意义的 remap。
+  const metaByIdx = new Map(chunkMetas.map((m) => [m.chunkIndex, m]));
+  const targets = [];
+  const seen = new Set();
+  for (const f of failure.chunks) {
+    const idxs = sizeChanged
+      ? remapFailureIndexes([f.chunkIndex], failureChunkSize, newChunkSize)
+      : [f.chunkIndex];
+    for (const i of idxs) {
+      if (seen.has(i)) continue;
+      const m = metaByIdx.get(i);
+      if (m) { targets.push({ failure: f, meta: m }); seen.add(i); }
+    }
+  }
   if (targets.length === 0) return null;
 
   const id = nextTaskId();
@@ -673,6 +746,38 @@ export function cancelTask(id) {
   pumpQueue();
 }
 
+/**
+ * v26.3：删除项目时级联取消该项目的全部任务。
+ * 覆盖 running / paused（走 cancelTask）、idle 排队（直接标取消并移出队列）、
+ * interrupted 恢复项（展示态，标取消即可）。返回取消的任务数。
+ */
+export function cancelTasksForProject(projectId) {
+  if (!projectId) return 0;
+  let count = 0;
+  for (const t of Array.from(tasks.values())) {
+    if (t.projectId !== projectId) continue;
+    if (t.status === 'interrupted') {
+      updateTask(t, { status: 'cancelled', isPaused: false, finishedAt: Date.now() });
+      count += 1;
+      continue;
+    }
+    if (t.status === 'idle') {
+      const qi = pendingQueue.indexOf(t);
+      if (qi >= 0) pendingQueue.splice(qi, 1);
+      updateTask(t, { status: 'cancelled', isPaused: false, finishedAt: Date.now() });
+      t.resolve?.({ cancelled: true, successCount: t.successCount, failedCount: t.failedCount });
+      count += 1;
+      continue;
+    }
+    if (ACTIVE_STATUSES.has(t.status)) {
+      cancelTask(t.id);
+      count += 1;
+    }
+  }
+  pumpQueue();
+  return count;
+}
+
 export function removeTask(id) {
   const t = tasks.get(id);
   if (!t) return;
@@ -684,6 +789,26 @@ export function removeTask(id) {
   if (idx >= 0) pendingQueue.splice(idx, 1);
   tasks.delete(id);
   notifyTask(t);  // 通知订阅者「已删除」
+}
+
+// v27：UI 任务调参。只允许改分片与并发，且仅对运行/暂停/排队任务生效。
+export function updateTaskParams(id, patch) {
+  const task = tasks.get(id);
+  if (!task || !patch) return false;
+  let changed = false;
+  if (patch.chunkSize !== undefined && Number.isFinite(patch.chunkSize) && patch.chunkSize >= 100) {
+    task.chunkSize = patch.chunkSize;
+    changed = true;
+  }
+  if (patch.concurrency !== undefined) {
+    const n = clampConcurrency(patch.concurrency);
+    if (n !== task.concurrency) {
+      task.concurrency = n;
+      changed = true;
+    }
+  }
+  if (changed) notifyTask(task);
+  return changed;
 }
 
 export function getTask(id) {
@@ -700,11 +825,13 @@ export function getTasksSnapshot() {
     status: t.status,
     total: t.total,
     overallTotal: t.overallTotal,
+    chunkSize: t.chunkSize,
     completed: t.completed,
     successCount: t.successCount,
     failedCount: t.failedCount,
     rateLimitCount: t.rateLimitCount,
     degraded: t.degraded,
+    concurrency: t.concurrency,
     initialConcurrency: t.initialConcurrency,
     currentConcurrency: t.currentConcurrency,
     chapterFrom: t.chapterFrom,
@@ -778,6 +905,8 @@ export function restoreInterruptedTasks(entries = []) {
     task.status = 'interrupted';
     task.completed = lastCompleted;
     task.startIndex = lastCompleted;
+    // v27-fix: 恢复项带上断点 chunkSize，任务卡片才能显示并编辑分片（续跑覆盖用）
+    if (Number.isFinite(entry.chunkSize) && entry.chunkSize > 0) task.chunkSize = entry.chunkSize;
     task.createdAt = Number(entry.timestamp) || task.createdAt;
     task._recoverable = true;
 
