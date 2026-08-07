@@ -1,5 +1,7 @@
 # ai-novel-screenplay-analyzer
 
+![License](https://img.shields.io/badge/license-MIT-green) ![Python](https://img.shields.io/badge/python-3.10-blue) ![Node](https://img.shields.io/badge/node-20.19%2B-brightgreen)
+
 ## 小说剧本智能分析工作台
 
 面向长篇小说、剧本与改编项目的 AI 叙事分析工作台，自动梳理人物关系、章节脉络与关系演化，支持多模型接入、长任务断点恢复及本地私有部署。
@@ -199,8 +201,9 @@ npm run build:portable            # 构建 Windows 便携版
 
 欢迎通过 Issue 反馈问题，或提交 Pull Request 改进功能、文档和测试。提交代码前请至少运行相关工作区的测试与前端构建。
 
-本项目采用 MIT License。
+本项目采用 [MIT License](LICENSE)。
 
 ---
 
 小说剧本智能分析工作台：让每一次立项，都有原文依据。
+

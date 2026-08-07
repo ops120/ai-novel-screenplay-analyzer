@@ -36,8 +36,8 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
-package-lock.json
 yarn.lock
+# package-lock.json 由 npm 工作区生成，提交以支持可复现构建（CI 用 npm ci）
 
 # 前端构建产物
 frontend/dist/
