@@ -107,3 +107,9 @@ electron/build/
 .coverage
 htmlcov/
 .tox/
+
+# debug scripts (Playwright ad-hoc probes)
+_shot*.py
+_shot*.log
+# ad-hoc Playwright screenshots
+screenshots/
