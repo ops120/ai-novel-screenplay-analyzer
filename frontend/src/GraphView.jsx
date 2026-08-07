@@ -228,7 +228,7 @@ export default function GraphView({ nodes, edges, edgeLabelLines = 1, onSelectNo
         <div className="nl-graph-canvas-bg">
           <div className="nl-graph-canvas-grid" aria-hidden="true" />
           <div className="nl-graph-placeholder">
-            <div className="nl-graph-placeholder-kicker">IP 分析工作台</div>
+            <div className="nl-graph-placeholder-kicker">小说剧本智能分析工作台</div>
             <div className="nl-graph-placeholder-icon" aria-hidden="true">🗺️</div>
             <h3>从一份原文开始建立共同理解</h3>
             <p>打开项目库，导入小说或剧本，系统会按章节整理人物关系与演化脉络。</p>
