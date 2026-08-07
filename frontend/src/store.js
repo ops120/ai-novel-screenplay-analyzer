@@ -533,11 +533,11 @@ export const useStore = create((set, get) => {
     }
   },
 
-  retryFailedChunks: async (concurrency) => {
+  retryFailedChunks: async (chunkSize, concurrency) => {
     const { currentProjectId, currentLlmId, llmModels, systemPrompt, lastFailure } = get();
     if (!currentProjectId || !lastFailure?.chunks?.length) return;
-    const chunkSize = lastFailure.chunkSize;
-    if (!Number.isFinite(chunkSize) || chunkSize <= 0) return;
+    const cs = Number.isFinite(chunkSize) && chunkSize > 0 ? chunkSize : lastFailure.chunkSize;
+    if (!Number.isFinite(cs) || cs <= 0) return;
 
     const selectedModel = llmModels.find(m => m.id === currentLlmId);
     if (!selectedModel) return;
@@ -549,7 +549,7 @@ export const useStore = create((set, get) => {
       modelName: selectedModel.name,
       modelId: currentLlmId,
       systemPrompt,
-      chunkSize,
+      chunkSize: cs,
       concurrency,
       failedChunks: lastFailure.chunks,
       totalChunks: lastFailure.totalChunks,

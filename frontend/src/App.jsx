@@ -1039,7 +1039,7 @@ export default function App() {
           {s.lastFailure && !s.isAnalyzing && (
             <div className="nl-ref-failure">
               上次失败 {s.lastFailure.chunks.length} 片
-              <button className="nl-pill" onClick={() => s.retryFailedChunks(concurrency)}>重试</button>
+              <button className="nl-pill" onClick={() => s.retryFailedChunks(chunkSize, concurrency)}>重试</button>
               <button className="nl-pill" onClick={s.clearLastFailure}>忽略</button>
             </div>
           )}

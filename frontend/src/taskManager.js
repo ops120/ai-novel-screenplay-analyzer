@@ -588,7 +588,7 @@ export async function createRetryFailedTask(opts) {
   const failure = getFailure(opts.projectId);
   if (!failure || failure.chunks.length === 0) return null;
   const text = failure.text || '';
-  const chunkSize = failure.chunkSize;
+  const chunkSize = opts.chunkSize || failure.chunkSize;
 
   let chunkMetas = [];
   let overallTotal = failure.totalChunks || 0;
