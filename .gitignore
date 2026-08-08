@@ -90,8 +90,6 @@ desktop.ini
 *.app
 *.dmg
 *.pkg
-electron/dist/
-electron/build/
 
 # 缓存
 .cache/
