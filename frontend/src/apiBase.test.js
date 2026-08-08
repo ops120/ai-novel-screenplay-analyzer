@@ -5,20 +5,15 @@ import { resolveApiBase } from './apiBase.js';
 
 test('an explicit API base always wins', () => {
   assert.equal(resolveApiBase({
-    envBase: 'https://api.example.test/custom',
-    protocol: 'http:',
+    envBase: '  https://api.example.test/custom  ',
+    protocol: 'file:',
   }), 'https://api.example.test/custom');
 });
 
-test('Electron file pages connect directly to the local backend', () => {
-  assert.equal(
-    resolveApiBase({ protocol: 'file:' }),
-    'http://127.0.0.1:28000/api',
-  );
-});
-
-test('web development pages use the same-origin Vite proxy', () => {
+test('http, https, and file pages all use the same-origin API', () => {
   assert.equal(resolveApiBase({ protocol: 'http:' }), '/api');
   assert.equal(resolveApiBase({ protocol: 'https:' }), '/api');
+  assert.equal(resolveApiBase({ protocol: 'file:' }), '/api');
+  assert.equal(resolveApiBase(), '/api');
 });
 

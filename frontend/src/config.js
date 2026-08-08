@@ -3,7 +3,7 @@
 // v22.1：API_BASE 集中管理，走 Vite proxy / 生产 nginx
 import { resolveApiBase } from './apiBase.js';
 
-export const API_BASE = resolveApiBase({ protocol: globalThis.location?.protocol });
+export const API_BASE = resolveApiBase();
 
 export const CONFIG = {
   // Debug 模式
