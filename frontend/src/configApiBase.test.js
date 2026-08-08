@@ -1,14 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-test('file 页面使用本地后端 API，而不是无效的相对 /api', async () => {
-  const originalLocation = globalThis.location;
-  globalThis.location = { protocol: 'file:' };
-  try {
-    const { API_BASE } = await import(`./config.js?file-protocol=${Date.now()}`);
-    assert.equal(API_BASE, 'http://127.0.0.1:28000/api');
-  } finally {
-    if (originalLocation === undefined) delete globalThis.location;
-    else globalThis.location = originalLocation;
-  }
+test('configured API base honors an explicit environment override', async () => {
+  const { resolveConfiguredApiBase } = await import('./config.js');
+
+  assert.equal(typeof resolveConfiguredApiBase, 'function');
+  assert.equal(
+    resolveConfiguredApiBase({
+      VITE_API_BASE: ' https://api.example.test/custom ',
+    }),
+    'https://api.example.test/custom',
+  );
+  assert.equal(resolveConfiguredApiBase({}), '/api');
 });

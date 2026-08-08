@@ -3,7 +3,7 @@ r"""小说剧本智能分析工作台后端（单文件 FastAPI 服务）
 v6 安全回归修复（紧接 v5）：
   Fix-1 (P0) 删除 resolve_api_key 兼容垫片：_call_llm 只接受已注册 llm_models.id，
           杜绝「客户端可控 base_url + 后端密钥」外发链路。
-  Fix-2 (P0) CORS 移除 "null"（iframe sandbox 攻击 Origin），仅保留本地开发 + file://。
+  Fix-2 (P0) CORS 移除 "null"（iframe sandbox 攻击 Origin），仅保留本地开发源。
   Fix-3 (P1) 项目 ID 升级到 secrets.token_urlsafe(16)（22 字符 base64，128-bit），
           旧 hex ID 仍可读；新建必须用新算法。
   Fix-4 id pattern 收紧到 ^[^\s,]+$，排除空白和逗号（防 GROUP_CONCAT 污染 + __proto__）。
@@ -68,16 +68,14 @@ import task_engine
 app = FastAPI()
 
 # ---------- Fix-2：CORS 精确白名单（v6 移除 "null"，避免 iframe sandbox 攻击） ----------
-# Electron 打包后前端以 file:// 加载，正常 Origin 是 file://，绝不会是 "null"。
-# 历史上加 "null" 是为了让 Electron 早期版本通过 CORS——但这也让恶意网页通过
-# <iframe sandbox> 注入 Origin: null 预检通过，是 v6 P0 攻击链的关键一环。
+# Web 生产环境通过同源 /api 访问，无需 CORS；以下白名单仅供本地开发服务器。
+# 不允许 file:// 或 "null" 来源，避免恢复已移除的桌面传输兼容及 sandbox 攻击面。
 # 可用环境变量 STORYMAP_CORS_ORIGINS（逗号分隔）覆盖。
 DEFAULT_CORS_ORIGINS = [
     "http://localhost:15173",
     "http://127.0.0.1:15173",
     "http://localhost:5189",
     "http://127.0.0.1:5189",
-    "file://",
 ]
 _cors_env = os.environ.get("STORYMAP_CORS_ORIGINS", "")
 CORS_ORIGINS = [o.strip() for o in _cors_env.split(",") if o.strip()] or DEFAULT_CORS_ORIGINS

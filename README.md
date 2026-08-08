@@ -6,6 +6,8 @@
 
 小说剧本智能分析工作台：面向长篇小说、剧本与改编项目，自动梳理人物关系、章节脉络与关系演化，支持多模型接入、长任务断点恢复及本地私有部署。
 
+项目以本机浏览器访问的 Web 应用形式运行。
+
 它把长篇原文整理为可复核的项目底稿，帮助出版编辑、影视开发、制片和版权评估团队更快形成共同理解。
 
 > 不是替你读小说，而是让团队读同一本小说。
@@ -21,7 +23,6 @@
 - **多模型接入**：支持 OpenAI-compatible、火山方舟和阿里百炼协议。
 - **可靠长任务**：支持暂停、继续、失败切片重试、限流降并发和刷新后恢复。
 - **本地优先**：分析数据存储在本机 SQLite，可用于单机或私有部署。
-- **Windows 桌面版**：提供 Electron 封装和便携版打包配置。
 
 ## 目录
 
@@ -53,7 +54,7 @@
 # Python 后端依赖
 pip install -r requirements.txt
 
-# 前端与 Electron 工作区依赖
+# 前端依赖
 npm install
 ```
 
@@ -193,7 +194,8 @@ MiniMax M3 等兼容 OpenAI 接口的模型，可选择 `openai` 协议并填写
 ```bash
 npm run dev                       # 启动前端开发服务器
 npm run build                     # 构建前端生产包
-npm test                          # 运行各工作区测试
+npm test                          # 运行前端测试
+python -m pytest backend -q       # 运行后端测试
 ```
 
 在 `frontend` 目录：
@@ -205,18 +207,11 @@ npm test
 npm run check:api-endpoints
 ```
 
-在 `electron` 目录：
-
-```bash
-npm test
-npm run build:portable            # 构建 Windows 便携版
-```
-
 ## 数据与安全
 
 - 默认数据库：仓库根目录 `storymap.db`。
 - 可通过 `STORYMAP_DB` 指定数据库路径。
-- API Key 和项目数据保存在本地数据库或本机用户数据目录，不会由 README 或前端源码提供。
+- API Key 和项目数据保存在本地 SQLite 数据库中，不会由 README 或前端源码提供。
 - 建议定期使用项目导出功能备份数据，并在公开仓库中忽略数据库文件和密钥文件。
 
 常用后端环境变量：
@@ -241,7 +236,6 @@ npm run build:portable            # 构建 Windows 便携版
 │   ├── src/                    # React 页面、状态与分析流程
 │   ├── vite.config.js          # Vite 端口与 API 代理
 │   └── package.json
-├── electron/                   # Windows Electron 封装与数据库迁移
 ├── start.cmd                   # Windows 一键启动
 ├── start_backend.cmd           # 仅启动后端
 ├── start_frontend.cmd          # 仅启动前端

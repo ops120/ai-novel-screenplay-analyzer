@@ -110,7 +110,20 @@ class TaskProgressRoutesTest(unittest.TestCase):
                                 json={"lastCompleted": 1})
         self.assertEqual(res.status_code, 404)
 
-    def test_file_origin_cors_allows_progress_patch(self):
+    def test_localhost_origin_cors_allows_progress_patch(self):
+        origin = "http://localhost:15173"
+        res = self.client.options(
+            f"/api/task-progress/{self.pid}",
+            headers={
+                "Origin": origin,
+                "Access-Control-Request-Method": "PATCH",
+            },
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        self.assertEqual(res.headers.get("access-control-allow-origin"), origin)
+        self.assertIn("PATCH", res.headers.get("access-control-allow-methods", ""))
+
+    def test_file_origin_cors_is_rejected(self):
         res = self.client.options(
             f"/api/task-progress/{self.pid}",
             headers={
@@ -118,8 +131,7 @@ class TaskProgressRoutesTest(unittest.TestCase):
                 "Access-Control-Request-Method": "PATCH",
             },
         )
-        self.assertEqual(res.status_code, 200, res.text)
-        self.assertIn("PATCH", res.headers.get("access-control-allow-methods", ""))
+        self.assertNotIn("access-control-allow-origin", res.headers)
 
 
 if __name__ == "__main__":
