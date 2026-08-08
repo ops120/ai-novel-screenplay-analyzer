@@ -122,3 +122,6 @@ docs/
 # Vite 模板写料资源（未使用）
 frontend/src/assets/react.svg
 _ui_shot*.png
+
+# 踩坑记录（本地保留，不入库）
+踩坑记录.md
