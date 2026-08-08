@@ -27,7 +27,7 @@ assignees: ""
 ## 环境
 
 - 操作系统（Windows / macOS / Linux）：
-- 浏览器或 Electron 版本：
+- 浏览器版本：
 - 后端端口（默认 28000）：
 - 前端端口（默认 15173）：
 - 项目版本或 commit：
