@@ -150,6 +150,8 @@ export default function App() {
   const [systemPrompt, setSystemPrompt] = useState('');
   const [concurrency, setConcurrency] = useState(2);
   const [chapterSearchTerm, setChapterSearchTerm] = useState('');
+  const fromColRef = useRef(null);
+  const toColRef = useRef(null);
   const [showChapterPicker, setShowChapterPicker] = useState(false);
   const [showTimelineDrawer, setShowTimelineDrawer] = useState(false);
   const [showProjectDrawer, setShowProjectDrawer] = useState(false);
@@ -402,6 +404,11 @@ export default function App() {
     return filterChapters(graphChapterOptions, chapterSearchTerm)
       .map(r => graphChapterOptions[r.originalIndex]);
   }, [graphChapterOptions, chapterSearchTerm]);
+
+  useEffect(() => {
+    if (fromColRef.current) fromColRef.current.scrollTop = 0;
+    if (toColRef.current) toColRef.current.scrollTop = 0;
+  }, [chapterSearchTerm]);
 
   // 章节范围按钮显示文本
   const chapterRangeLabel = useMemo(() => {
@@ -1152,9 +1159,11 @@ export default function App() {
                   onChange={e => setChapterSearchTerm(e.target.value)}
                 />
                 <div className="nl-picker-cols">
-                  <div className="nl-picker-col">
+                  <div className="nl-picker-col" ref={fromColRef}>
                     <div className="nl-picker-col-title">起始{chapterTerm}</div>
-                    {filteredChapterOptions.map((ch, i) => (
+                    {filteredChapterOptions.length === 0 ? (
+                <div className="nl-picker-empty">无匹配章节</div>
+              ) : filteredChapterOptions.map((ch, i) => (
                       <div
                         key={`from-${i}`}
                         className={`nl-picker-item ${s.graphRange.from === graphChapterOptions.indexOf(ch) + 1 ? 'active' : ''}`}
@@ -1162,9 +1171,11 @@ export default function App() {
                       >{ch}</div>
                     ))}
                   </div>
-                  <div className="nl-picker-col">
+                  <div className="nl-picker-col" ref={toColRef}>
                     <div className="nl-picker-col-title">终止{chapterTerm}</div>
-                    {filteredChapterOptions.map((ch, i) => (
+                    {filteredChapterOptions.length === 0 ? (
+                <div className="nl-picker-empty">无匹配章节</div>
+              ) : filteredChapterOptions.map((ch, i) => (
                       <div
                         key={`to-${i}`}
                         className={`nl-picker-item ${s.graphRange.to === graphChapterOptions.indexOf(ch) + 1 ? 'active' : ''}`}

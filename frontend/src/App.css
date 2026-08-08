@@ -653,6 +653,13 @@
   color: var(--accent);
   font-weight: 600;
 }
+
+.nl-picker-empty {
+  padding: 14px 8px;
+  font-size: 12px;
+  color: var(--ink-faint);
+  text-align: center;
+}
 .nl-picker-foot {
   margin-top: 8px;
   text-align: right;

@@ -68,7 +68,9 @@ export function filterChapters(list, term) {
 
   return list
     .map((range, originalIndex) => {
-      const title = String(range.chapter || '');
+      const rawTitle = (range && typeof range === 'object') ? range.chapter : range;
+      const title = String(rawTitle || '');
+
       const titleNum = parseChapterNumber(title);
       let score = -1;
 
