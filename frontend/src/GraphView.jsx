@@ -12,6 +12,8 @@ export default function GraphView({ nodes, edges, edgeLabelLines = 1, onSelectNo
   const currentProjectId = useStore(state => state.currentProjectId);
   const draggedPositionsRef = useRef(new Map());
   const lastProjectIdRef = useRef(null);
+  const renderFrameRef = useRef(null);
+  const lastGraphSignatureRef = useRef('');
 
   // 格式化图数据
   const formatGraphData = (nodeList, edgeList, lines) => {
@@ -94,9 +96,15 @@ export default function GraphView({ nodes, edges, edgeLabelLines = 1, onSelectNo
       return;
     }
 
+    const signature = `${currentProjectId || ''}|${edgeLabelLines}|${nodes.map(n => `${n.id}:${n.label || ''}`).join('|')}|${edges.map(e => `${e.source}>${e.target}:${e.label || ''}:${e.occurrence || ''}`).join('|')}`;
+    if (graphRef.current && lastGraphSignatureRef.current === signature) return;
+    lastGraphSignatureRef.current = signature;
+
     setIsRendering(true);
 
-    requestAnimationFrame(() => {
+    if (renderFrameRef.current !== null) cancelAnimationFrame(renderFrameRef.current);
+    renderFrameRef.current = requestAnimationFrame(() => {
+      renderFrameRef.current = null;
       try {
         if (lastProjectIdRef.current !== currentProjectId) {
           draggedPositionsRef.current.clear();
@@ -116,12 +124,14 @@ export default function GraphView({ nodes, edges, edgeLabelLines = 1, onSelectNo
           radius: 200,
         } : {
           type: 'force',
-          linkDistance: 150,
-          nodeStrength: -150,
-          edgeStrength: 0.2,
+          linkDistance: 100,
+          nodeStrength: -50,
+          edgeStrength: 0.4,
           preventOverlap: true,
-          nodeSize: 60,
-          maxIteration: 200,
+          nodeSize: 50,
+          maxIteration: 300,
+          alphaDecay: 0.05,
+          alphaMin: 0.01,
         };
 
         graphRef.current = new Graph({
@@ -171,6 +181,14 @@ export default function GraphView({ nodes, edges, edgeLabelLines = 1, onSelectNo
           } catch {}
         });
 
+        // 布局完成后兜底停止 force 模拟，防止 preventOverlap 等余震导致节点持续抖动
+        graphRef.current.on('afterlayout', () => {
+          try {
+            const lm = graphRef.current.get('layoutController')?.layoutMethods?.[0];
+            lm?.forceSimulation?.stop?.();
+          } catch {}
+        });
+
         graphRef.current.data(graphData);
         graphRef.current.render();
         setIsRendering(false);
@@ -179,7 +197,13 @@ export default function GraphView({ nodes, edges, edgeLabelLines = 1, onSelectNo
         setIsRendering(false);
       }
     });
-  }, [nodes, edges, edgeLabelLines]);
+    return () => {
+      if (renderFrameRef.current !== null) {
+        cancelAnimationFrame(renderFrameRef.current);
+        renderFrameRef.current = null;
+      }
+    };
+  }, [nodes, edges, edgeLabelLines, currentProjectId]);
 
   // 边标签行数切换（原地更新，不重建图）
   useEffect(() => {
