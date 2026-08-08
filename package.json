@@ -3,8 +3,7 @@
   "private": true,
   "version": "2.4.0",
   "workspaces": [
-    "frontend",
-    "electron"
+    "frontend"
   ],
   "scripts": {
     "dev": "npm run dev --workspace frontend",
