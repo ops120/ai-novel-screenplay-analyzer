@@ -1194,7 +1194,6 @@ export default function App() {
 
           <div className="nl-legend">
             <span className="nl-legend-item"><span className="nl-legend-swatch" style={{ background: 'var(--accent, #b8323a)' }} />多次出现</span>
-            <span className="nl-legend-item"><span className="nl-legend-swatch" style={{ background: 'var(--gold, #a87939)' }} />关键人物</span>
           </div>
 
           <div className="nl-toolbar-label">

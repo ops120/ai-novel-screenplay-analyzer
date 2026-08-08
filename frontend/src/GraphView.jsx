@@ -9,6 +9,9 @@ export default function GraphView({ nodes, edges, edgeLabelLines = 1, onSelectNo
   const graphRef = useRef(null);
   const [isRendering, setIsRendering] = useState(false);
   const isLoadingProject = useStore(state => state.isLoadingProject);
+  const currentProjectId = useStore(state => state.currentProjectId);
+  const draggedPositionsRef = useRef(new Map());
+  const lastProjectIdRef = useRef(null);
 
   // 格式化图数据
   const formatGraphData = (nodeList, edgeList, lines) => {
@@ -18,22 +21,35 @@ export default function GraphView({ nodes, edges, edgeLabelLines = 1, onSelectNo
     });
 
     return {
-      nodes: nodeList.map(n => ({
-        id: String(n.id),
-        label: n.label,
-        style: {
-          fill: '#e6f7ff',
-          stroke: '#4D6BFE',
-          lineWidth: 2,
-        },
-        labelCfg: {
-          style: { fill: '#1a1a1a', fontSize: 14 }
+      nodes: nodeList.map(n => {
+        const saved = draggedPositionsRef.current.get(String(n.id));
+        const nodeModel = {
+          id: String(n.id),
+          label: n.label,
+          style: {
+            fill: '#e6f7ff',
+            stroke: '#4D6BFE',
+            lineWidth: 2,
+          },
+          labelCfg: {
+            style: { fill: '#1a1a1a', fontSize: 14 }
+          }
+        };
+        if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
+          nodeModel.x = saved.x;
+          nodeModel.y = saved.y;
+          nodeModel.fx = saved.x;
+          nodeModel.fy = saved.y;
         }
-      })),
+        return nodeModel;
+      }),
       edges: validEdges.map(e => {
         const rawLabel = e.label || '';
         const displayLabel = truncateLabelForLines(rawLabel, lines);
         const isComplex = rawLabel.includes(' → ');
+        const occurrenceNum = Number(e.occurrence);
+        const isMultiple = Number.isFinite(occurrenceNum) && occurrenceNum > 1;
+        const isHot = isComplex || isMultiple; // 多次出现或复杂关系 → 红色加粗
         const multiLine = lines > 1;
         return {
           source: String(e.source),
@@ -41,11 +57,11 @@ export default function GraphView({ nodes, edges, edgeLabelLines = 1, onSelectNo
           label: displayLabel,
           labelTitle: rawLabel, // 原始标签备用
           style: {
-            stroke: isComplex ? '#ff6b6b' : '#bbb',
-            lineWidth: isComplex ? 3 : 1.5,
+            stroke: isHot ? '#ff6b6b' : '#bbb',
+            lineWidth: isHot ? 3 : 1.5,
             endArrow: {
               path: 'M 0,0 L 6,3 L 6,-3 Z',
-              fill: isComplex ? '#ff6b6b' : '#bbb',
+              fill: isHot ? '#ff6b6b' : '#bbb',
             },
           },
           labelCfg: {
@@ -82,6 +98,10 @@ export default function GraphView({ nodes, edges, edgeLabelLines = 1, onSelectNo
 
     requestAnimationFrame(() => {
       try {
+        if (lastProjectIdRef.current !== currentProjectId) {
+          draggedPositionsRef.current.clear();
+          lastProjectIdRef.current = currentProjectId;
+        }
         const graphData = formatGraphData(nodes, edges, edgeLabelLines);
 
         // 销毁旧实例
@@ -135,6 +155,20 @@ export default function GraphView({ nodes, edges, edgeLabelLines = 1, onSelectNo
         graphRef.current.on('node:click', (evt) => {
           const nodeId = evt.item?.getModel()?.id;
           if (nodeId && onSelectNode) onSelectNode(nodeId);
+        });
+
+        // 拖拽结束：记忆位置并固定 fx/fy，force 布局不再拉回，图重建后也能恢复
+        graphRef.current.on('dragnodeend', (evt) => {
+          const item = evt?.items?.[0] || evt?.targetItem;
+          const model = item?.getModel?.();
+          if (!model || !Number.isFinite(model.x) || !Number.isFinite(model.y)) return;
+          draggedPositionsRef.current.set(String(model.id), { x: model.x, y: model.y });
+          model.fx = model.x;
+          model.fy = model.y;
+          try {
+            const layoutMethod = graphRef.current.get('layoutController')?.layoutMethods?.[0];
+            layoutMethod?.forceSimulation?.stop?.();
+          } catch {}
         });
 
         graphRef.current.data(graphData);
